@@ -12,6 +12,7 @@ import json
 import re
 import os
 
+
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 TZ = "America/Sao_Paulo"
 
