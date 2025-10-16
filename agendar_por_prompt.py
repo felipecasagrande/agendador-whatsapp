@@ -94,10 +94,12 @@ def resolver_datetime_pt(texto: str, default_time="14:00", tz_str=TZ):
     tz = pytz.timezone(tz_str)
     now = datetime.now(tz)
     t = _norm(texto)
-
     base_local = now.replace(tzinfo=None)
+
+    # tenta primeiro com dateparser
     dt = dateparser.parse(
-        t, languages=["pt"],
+        t,
+        languages=["pt"],
         settings={
             "RETURN_AS_TIMEZONE_AWARE": False,
             "PREFER_DATES_FROM": "future",
@@ -105,23 +107,45 @@ def resolver_datetime_pt(texto: str, default_time="14:00", tz_str=TZ):
         }
     )
 
-    if not dt:
-        if "amanha" in t:
-            h = re.search(r"\b(\d{1,2})(?::|h)?(\d{2})?\b", t)
-            hour = int(h.group(1)) if h else int(default_time.split(":")[0])
-            minute = int(h.group(2) or 0) if h else int(default_time.split(":")[1])
-            dt = (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0).replace(tzinfo=None)
+    # 🔒 Fallback robusto (garante dt != None)
+    if dt is None:
+        print(f"⚠️ [resolver_datetime_pt] dateparser falhou para '{t}', aplicando fallback manual.")
+        if "amanha" in t or "amanhã" in t:
+            match = re.search(r"\b(\d{1,2})(?::|h)?(\d{2})?\b", t)
+            hour = int(match.group(1)) if match else int(default_time.split(":")[0])
+            minute = int(match.group(2) or 0) if match else int(default_time.split(":")[1])
+            dt = (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+        else:
+            # procura por dia da semana
+            dow = next((WEEKDAYS_PT[k] for k in WEEKDAYS_PT if k in t), None)
+            if dow is not None:
+                days_ahead = (dow - now.weekday()) % 7
+                if days_ahead == 0:
+                    days_ahead = 7
+                match = re.search(r"\b(\d{1,2})(?::|h)?(\d{2})?\b", t)
+                hour = int(match.group(1)) if match else int(default_time.split(":")[0])
+                minute = int(match.group(2) or 0) if match else int(default_time.split(":")[1])
+                dt = (now + timedelta(days=days_ahead)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+            else:
+                # fallback genérico
+                hour, minute = map(int, default_time.split(":"))
+                dt = (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-    # se o parser tratou "amanhã" mas devolveu hoje, força +1 dia
-    if "amanha" in t and dt.date() == now.date():
+    # segurança — garante que dt existe
+    if dt is None:
+        raise ValueError(f"❌ Não foi possível interpretar data/hora em '{texto}'")
+
+    # garante que "amanhã" vire realmente o próximo dia
+    if ("amanha" in t or "amanhã" in t) and dt.date() == now.date():
         dt = dt + timedelta(days=1)
 
-    fuso_brasilia = pytz.timezone("America/Sao_Paulo")
-    parsed = fuso_brasilia.localize(dt)
-
+    parsed = tz.localize(dt)
     date_iso = parsed.strftime("%Y-%m-%d")
     time_iso = parsed.strftime("%H:%M")
+
+    print(f"✅ [resolver_datetime_pt] Texto='{texto}' → {date_iso} {time_iso}")
     return date_iso, time_iso
+
 
 
 def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, descricao):
