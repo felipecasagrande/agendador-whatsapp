@@ -142,6 +142,7 @@ def resolver_datetime_pt(texto: str, default_time="14:00", tz_str=TZ):
     t = _norm(texto)
     base_local = now.replace(tzinfo=None)
 
+    # 1️⃣ Tenta interpretar diretamente
     dt = dateparser.parse(
         t,
         languages=["pt"],
@@ -152,64 +153,40 @@ def resolver_datetime_pt(texto: str, default_time="14:00", tz_str=TZ):
         },
     )
 
-    # fallback manual
+    # 2️⃣ Se o parser não entendeu, aplica regras manuais
     if dt is None:
         print(f"⚠️ [resolver_datetime_pt] dateparser falhou para '{t}', aplicando fallback manual.")
-        if "amanha" in t or "amanhã" in t:
+
+        # --- CORREÇÃO: caso "hoje" esteja no texto ---
+        if "hoje" in t:
+            match = re.search(r"\b(\d{1,2})(?::|h)?(\d{2})?\b", t)
+            hour = int(match.group(1)) if match else int(default_time.split(":")[0])
+            minute = int(match.group(2) or 0) if match else int(default_time.split(":")[1])
+            dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        
+        elif "amanha" in t or "amanhã" in t:
             match = re.search(r"\b(\d{1,2})(?::|h)?(\d{2})?\b", t)
             hour = int(match.group(1)) if match else int(default_time.split(":")[0])
             minute = int(match.group(2) or 0) if match else int(default_time.split(":")[1])
             dt = (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+
         else:
-            dow = next((WEEKDAYS_PT[k] for k in WEEKDAYS_PT if k in t), None)
-            if dow is not None:
-                days_ahead = (dow - now.weekday()) % 7 or 7
-                match = re.search(r"\b(\d{1,2})(?::|h)?(\d{2})?\b", t)
-                hour = int(match.group(1)) if match else int(default_time.split(":")[0])
-                minute = int(match.group(2) or 0) if match else int(default_time.split(":")[1])
-                dt = (now + timedelta(days=days_ahead)).replace(hour=hour, minute=minute, second=0, microsecond=0)
-            else:
-                hour, minute = map(int, default_time.split(":"))
-                dt = (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+            # fallback genérico para outras palavras
+            hour, minute = map(int, default_time.split(":"))
+            dt = (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-    # --- NOVO BLOCO: detectar datas explícitas tipo "dia 18", "18/10", "20 de outubro" ---
-    if dt is None:
-        m = re.search(r"\bdia\s*(\d{1,2})\b", t)
-        if m:
-            dia = int(m.group(1))
-            mes = now.month
-            ano = now.year
-            # se "mês" mencionado, atualiza
-            m2 = re.search(r"(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?", t)
-            if m2:
-                dia = int(m2.group(1))
-                mes = int(m2.group(2))
-                if m2.group(3):
-                    ano = int(m2.group(3))
-            # hora
-            match = re.search(r"\b(\d{1,2})(?::|h)?(\d{2})?\b", t)
-            hour = int(match.group(1)) if match else int(default_time.split(":")[0])
-            minute = int(match.group(2) or 0) if match else int(default_time.split(":")[1])
-            dt = datetime(ano, mes, dia, hour, minute)
-            print(f"📅 [resolver_datetime_pt] Data explícita detectada: {dt}")
+    # 3️⃣ Ajuste de coerência
+    if "amanha" in t or "amanhã" in t:
+        if dt.date() == now.date():
+            dt = dt + timedelta(days=1)
 
-    if dt is None:
-        raise ValueError(f"❌ Não foi possível interpretar data/hora em '{texto}'")
-
-    if ("amanha" in t or "amanhã" in t) and dt.date() == now.date():
-        dt = dt + timedelta(days=1)
-
-    # ---- 🔧 CORREÇÃO FINAL ----
     if dt.tzinfo is None:
         parsed = tz.localize(dt)
     else:
         parsed = dt.astimezone(tz)
 
-    date_iso = parsed.strftime("%Y-%m-%d")
-    time_iso = parsed.strftime("%H:%M")
-
-    print(f"✅ [resolver_datetime_pt] Texto='{texto}' → {date_iso} {time_iso}")
-    return date_iso, time_iso
+    print(f"✅ [resolver_datetime_pt] Texto='{texto}' → {parsed.strftime('%Y-%m-%d %H:%M')}")
+    return parsed.strftime("%Y-%m-%d"), parsed.strftime("%H:%M")
 
 
 # --------------------------------------------------------
