@@ -118,7 +118,20 @@ def interpretar_prompt(prompt: str) -> dict:
     if not data.get("data") or not data.get("hora"):
         print("⚠️ IA não retornou data/hora — ativando fallback manual.")
     else:
-        print(f"✅ IA interpretou corretamente: {data['data']} {data['hora']}")
+        # ✅ Corrige o ano se vier no passado
+        tz = pytz.timezone("America/Sao_Paulo")
+        now = datetime.now(tz)
+        try:
+            parsed_date = datetime.strptime(data["data"], "%Y-%m-%d").date()
+            if parsed_date.year < now.year:
+                new_date = parsed_date.replace(year=now.year)
+                data["data"] = new_date.strftime("%Y-%m-%d")
+                print(f"🔧 Corrigido ano da data para {data['data']}")
+        except Exception as e:
+            print(f"⚠️ Erro ao ajustar ano: {e}")
+
+    print(f"✅ IA interpretou corretamente: {data['data']} {data['hora']}")
+
 
     return data
 
