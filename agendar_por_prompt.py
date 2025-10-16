@@ -58,33 +58,59 @@ def get_calendar_service():
 # --------------------------------------------------------
 def interpretar_prompt(prompt: str) -> dict:
     if not client:
-        return {"titulo": "Reunião", "duracao_min": 60, "participantes": [], "descricao": ""}
+        return {"titulo": "Reunião", "data": None, "hora": None, "duracao_min": 60, "participantes": [], "descricao": ""}
 
     system = """
-    Responda SOMENTE JSON no formato:
-    {"titulo":"Reunião com ...","duracao_min":60,"participantes":["email@dominio"],"descricao":""}
+    Você é um assistente que extrai informações de eventos em linguagem natural (em português).
+    Retorne SOMENTE um JSON no formato:
+    {
+      "titulo": "...",
+      "data": "YYYY-MM-DD",
+      "hora": "HH:MM",
+      "duracao_min": 60,
+      "participantes": ["email@dominio"],
+      "descricao": ""
+    }
+
+    Regras:
+    - Use fuso horário de São Paulo (UTC-3).
+    - Se o texto disser "amanhã", "depois de amanhã", "hoje", "segunda", etc., converta para uma data exata ISO (YYYY-MM-DD).
+    - Se o texto contiver “às 10h30”, “10:30”, “10h”, etc., converta para formato HH:MM.
+    - Se não houver horário, use "14:00".
     - Se não houver duração, use 60.
-    - Se não houver e-mails, deixe participantes = [].
-    - NÃO inclua campos de data/hora.
+    - Se não houver data interpretável, use o dia seguinte.
+    - Retorne SOMENTE o JSON válido (sem comentários ou texto adicional).
     """
+
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-        temperature=0.2,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.1
     )
-    content = resp.choices[0].message.content
+
+    content = resp.choices[0].message.content.strip()
+
     try:
-        data = json.loads(content)
+        data = json.loads(content)      
     except Exception:
-        m = re.search(r"\{[\s\S]*\}", content)
-        if not m:
-            raise ValueError("IA não retornou JSON válido.")
-        data = json.loads(m.group(0))
+        match = re.search(r"\{[\s\S]*\}", content)
+        if not match:
+            raise ValueError(f"IA não retornou JSON válido: {content}")
+        data = json.loads(match.group(0))
 
     data.setdefault("titulo", "Reunião")
+    data.setdefault("data", None)
+    data.setdefault("hora", "14:00")
     data.setdefault("duracao_min", 60)
     data.setdefault("participantes", [])
     data.setdefault("descricao", "")
+
+    # Log de debug
+    print("🧩 Saída da IA:", json.dumps(data, ensure_ascii=False, indent=2))
+
     return data
 
 
