@@ -61,10 +61,10 @@ def interpretar_prompt(prompt: str) -> dict:
         return {"titulo": "Reunião", "data": None, "hora": None, "duracao_min": 60, "participantes": [], "descricao": ""}
 
     system = """
-    Você é um assistente que extrai informações de eventos em linguagem natural (em português).
-    Retorne SOMENTE um JSON no formato:
+    Você é um assistente que interpreta textos em português descrevendo compromissos e eventos.
+    Retorne SOMENTE um JSON válido no formato:
     {
-      "titulo": "...",
+      "titulo": "Reunião com João",
       "data": "YYYY-MM-DD",
       "hora": "HH:MM",
       "duracao_min": 60,
@@ -72,14 +72,15 @@ def interpretar_prompt(prompt: str) -> dict:
       "descricao": ""
     }
 
-    Regras:
-    - Use fuso horário de São Paulo (UTC-3).
-    - Se o texto disser "amanhã", "depois de amanhã", "hoje", "segunda", etc., converta para uma data exata ISO (YYYY-MM-DD).
-    - Se o texto contiver “às 10h30”, “10:30”, “10h”, etc., converta para formato HH:MM.
+    Regras importantes:
+    - Sempre converta palavras como "hoje", "amanhã", "depois de amanhã" ou "segunda" em uma data real (YYYY-MM-DD).
+    - O fuso horário é de São Paulo (UTC-3).
+    - Se o texto disser "às 20h30", converta para "20:30".
+    - Se o texto disser "10h", "10h00", ou "10:00", converta para "10:00".
     - Se não houver horário, use "14:00".
     - Se não houver duração, use 60.
-    - Se não houver data interpretável, use o dia seguinte.
-    - Retorne SOMENTE o JSON válido (sem comentários ou texto adicional).
+    - Se não houver e-mails, use uma lista vazia.
+    - Responda SOMENTE com JSON. Nenhum texto fora das chaves.
     """
 
     resp = client.chat.completions.create(
@@ -93,26 +94,33 @@ def interpretar_prompt(prompt: str) -> dict:
 
     content = resp.choices[0].message.content.strip()
 
+    # --- Tenta interpretar o JSON ---
     try:
-        data = json.loads(content)      
+        data = json.loads(content)
     except Exception:
-        match = re.search(r"\{[\s\S]*\}", content)
-        if not match:
+        m = re.search(r"\{[\s\S]*\}", content)
+        if not m:
             raise ValueError(f"IA não retornou JSON válido: {content}")
-        data = json.loads(match.group(0))
+        data = json.loads(m.group(0))
 
+    # --- Garante campos padrão ---
     data.setdefault("titulo", "Reunião")
     data.setdefault("data", None)
-    data.setdefault("hora", "14:00")
+    data.setdefault("hora", None)
     data.setdefault("duracao_min", 60)
     data.setdefault("participantes", [])
     data.setdefault("descricao", "")
 
-    # Log de debug
+    # --- LOG DE DEBUG ---
     print("🧩 Saída da IA:", json.dumps(data, ensure_ascii=False, indent=2))
 
-    return data
+    # --- NOVO: valida se data e hora estão realmente presentes ---
+    if not data.get("data") or not data.get("hora"):
+        print("⚠️ IA não retornou data/hora — ativando fallback manual.")
+    else:
+        print(f"✅ IA interpretou corretamente: {data['data']} {data['hora']}")
 
+    return data
 
 # --------------------------------------------------------
 # INTERPRETAÇÃO DE DATA/HORA (PORTUGUÊS)
