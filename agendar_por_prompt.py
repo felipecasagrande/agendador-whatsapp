@@ -148,10 +148,19 @@ def resolver_datetime_pt(texto: str, default_time="14:00", tz_str=TZ):
     return date_iso, time_iso
 
 def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, descricao):
-    inicio_dt = datetime.strptime(f"{data_inicio} {hora_inicio}", "%Y-%m-%d %H:%M")
-    fim_dt = inicio_dt + timedelta(minutes=int(duracao_min or 60))
-    start_iso = inicio_dt.strftime("%Y-%m-%dT%H:%M:%S")
-    end_iso = fim_dt.strftime("%Y-%m-%dT%H:%M:%S")
+    # CORREÇÃO APLICADA AQUI: usar fuso horário corretamente
+    fuso_brasilia = pytz.timezone("America/Sao_Paulo")
+    
+    # Criar datetime naive e depois localizar com o fuso horário
+    inicio_naive = datetime.strptime(f"{data_inicio} {hora_inicio}", "%Y-%m-%d %H:%M")
+    start_datetime = fuso_brasilia.localize(inicio_naive)
+    
+    # Calcular fim do evento
+    end_datetime = start_datetime + timedelta(minutes=int(duracao_min or 60))
+    
+    # Converter para ISO format
+    start_iso = start_datetime.isoformat()
+    end_iso = end_datetime.isoformat()
 
     service = get_calendar_service()
     body = {
