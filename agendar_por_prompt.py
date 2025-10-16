@@ -146,6 +146,27 @@ def resolver_datetime_pt(texto: str, default_time="14:00", tz_str=TZ):
                 hour, minute = map(int, default_time.split(":"))
                 dt = (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
 
+    # --- NOVO BLOCO: detectar datas explícitas tipo "dia 18", "18/10", "20 de outubro" ---
+    if dt is None:
+        m = re.search(r"\bdia\s*(\d{1,2})\b", t)
+        if m:
+            dia = int(m.group(1))
+            mes = now.month
+            ano = now.year
+            # se "mês" mencionado, atualiza
+            m2 = re.search(r"(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?", t)
+            if m2:
+                dia = int(m2.group(1))
+                mes = int(m2.group(2))
+                if m2.group(3):
+                    ano = int(m2.group(3))
+            # hora
+            match = re.search(r"\b(\d{1,2})(?::|h)?(\d{2})?\b", t)
+            hour = int(match.group(1)) if match else int(default_time.split(":")[0])
+            minute = int(match.group(2) or 0) if match else int(default_time.split(":")[1])
+            dt = datetime(ano, mes, dia, hour, minute)
+            print(f"📅 [resolver_datetime_pt] Data explícita detectada: {dt}")
+
     if dt is None:
         raise ValueError(f"❌ Não foi possível interpretar data/hora em '{texto}'")
 
