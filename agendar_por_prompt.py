@@ -93,12 +93,16 @@ def _norm(s:str)->str:
 def resolver_datetime_pt(texto: str, default_time="14:00", tz_str=TZ):
     tz = pytz.timezone(tz_str)
     now = datetime.now(tz)
-    base_naive = now.replace(tzinfo=None)
     t = _norm(texto)
 
+    base_local = now.replace(tzinfo=None)
     dt = dateparser.parse(
         t, languages=["pt"],
-        settings={"RETURN_AS_TIMEZONE_AWARE": False, "PREFER_DATES_FROM":"future", "RELATIVE_BASE": base_naive}
+        settings={
+            "RETURN_AS_TIMEZONE_AWARE": False,
+            "PREFER_DATES_FROM": "future",
+            "RELATIVE_BASE": base_local
+        }
     )
 
     if not dt:
@@ -106,46 +110,19 @@ def resolver_datetime_pt(texto: str, default_time="14:00", tz_str=TZ):
             h = re.search(r"\b(\d{1,2})(?::|h)?(\d{2})?\b", t)
             hour = int(h.group(1)) if h else int(default_time.split(":")[0])
             minute = int(h.group(2) or 0) if h else int(default_time.split(":")[1])
-            dt = (now + relativedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0).replace(tzinfo=None)
-        else:
-            dow = next((WEEKDAYS_PT[k] for k in WEEKDAYS_PT if k in t), None)
-            if dow is not None:
-                days_ahead = (dow - now.weekday()) % 7
-                if days_ahead == 0: days_ahead = 7
-                h = re.search(r"\b(\d{1,2})(?::|h)?(\d{2})?\b", t)
-                hour = int(h.group(1)) if h else int(default_time.split(":")[0])
-                minute = int(h.group(2) or 0) if h else int(default_time.split(":")[1])
-                dt = (now + relativedelta(days=days_ahead)).replace(hour=hour, minute=minute, second=0, microsecond=0).replace(tzinfo=None)
-    if not dt:
-        hour, minute = map(int, default_time.split(":"))
-        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if candidate <= now: candidate += relativedelta(days=1)
-        dt = candidate.replace(tzinfo=None)
+            dt = (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0).replace(tzinfo=None)
 
-    parsed = tz.localize(dt)
-    if parsed <= now:
-        if "amanha" in t:
-            parsed = now + relativedelta(days=1)
-            m = re.search(r"\b(\d{1,2})(?::|h)?(\d{2})?\b", t)
-            h = int(m.group(1)) if m else int(default_time.split(":")[0])
-            mm = int(m.group(2) or 0) if m else int(default_time.split(":")[1])
-            parsed = parsed.replace(hour=h, minute=mm, second=0, microsecond=0)
-        else:
-            dow = next((WEEKDAYS_PT[k] for k in WEEKDAYS_PT if k in t), None)
-            if dow is not None:
-                days_ahead = ((dow - now.weekday()) % 7) or 7
-                parsed = now + relativedelta(days=days_ahead)
-                m = re.search(r"\b(\d{1,2})(?::|h)?(\d{2})?\b", t)
-                h = int(m.group(1)) if m else int(default_time.split(":")[0])
-                mm = int(m.group(2) or 0) if m else int(default_time.split(":")[1])
-                parsed = parsed.replace(hour=h, minute=mm, second=0, microsecond=0)
-            else:
-                parsed = parsed.replace(year=now.year)
-                if parsed <= now: parsed = parsed + relativedelta(years=1)
+    # se o parser tratou "amanhã" mas devolveu hoje, força +1 dia
+    if "amanha" in t and dt.date() == now.date():
+        dt = dt + timedelta(days=1)
+
+    fuso_brasilia = pytz.timezone("America/Sao_Paulo")
+    parsed = fuso_brasilia.localize(dt)
 
     date_iso = parsed.strftime("%Y-%m-%d")
     time_iso = parsed.strftime("%H:%M")
     return date_iso, time_iso
+
 
 def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, descricao):
     # CORREÇÃO APLICADA AQUI: usar fuso horário corretamente
