@@ -1,41 +1,34 @@
-import os, json, logging
+import os
+import json
+import logging
 from dotenv import load_dotenv
 from flask import Flask, request, abort
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.request_validator import RequestValidator
 
-# Carrega envs
+# Importa as funções principais do agendador
+from agendar_por_prompt import interpretar_prompt, resolver_datetime_pt, criar_evento
+
+# ======================================================
+# 🔧 CONFIGURAÇÃO INICIAL
+# ======================================================
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
-# Importa funções principais
-from agendar_por_prompt import interpretar_prompt, resolver_datetime_pt, criar_evento
-
-# --------------------------------------------------------
-# GOOGLE CREDENTIALS (carrega via variáveis de ambiente)
-# --------------------------------------------------------
-def _materialize_google_files():
-    creds_txt = os.getenv("GOOGLE_CREDENTIALS_JSON")
-    token_txt = os.getenv("GOOGLE_TOKEN_JSON")
-    if creds_txt and not os.path.exists("credentials.json"):
-        with open("credentials.json", "w", encoding="utf-8") as f:
-            f.write(creds_txt)
-    if token_txt and not os.path.exists("token.json"):
-        with open("token.json", "w", encoding="utf-8") as f:
-            f.write(token_txt)
-
-_materialize_google_files()
-
-# --------------------------------------------------------
-# TWILIO SETTINGS
-# --------------------------------------------------------
+# ======================================================
+# 🔐 TWILIO CONFIG
+# ======================================================
 ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
-AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN", "")
+AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_WHATS_NUMBER = os.getenv("TWILIO_WHATS_NUMBER", "whatsapp:+14155238886")
 ALLOW_LIST = set(filter(None, [n.strip() for n in os.getenv("ALLOW_LIST", "").split(",")]))
 validator = RequestValidator(AUTH_TOKEN) if AUTH_TOKEN else None
 
+
+# ======================================================
+# 🧾 FUNÇÃO DE VALIDAÇÃO DE SEGURANÇA
+# ======================================================
 def _validate_twilio_signature():
     """Valida a assinatura de segurança da Twilio"""
     if not validator:
@@ -48,25 +41,22 @@ def _validate_twilio_signature():
         app.logger.warning("Assinatura Twilio inválida.")
         abort(403)
 
-# --------------------------------------------------------
-# ENDPOINT PRINCIPAL
-# --------------------------------------------------------
+
+# ======================================================
+# 💬 ENDPOINT PRINCIPAL - WHATSAPP
+# ======================================================
 @app.post("/whats")
 def whats():
-    """Recebe mensagens do WhatsApp e agenda eventos via Google Calendar"""
+    """
+    Recebe mensagens do WhatsApp, interpreta a frase com IA e agenda no Google Calendar.
+    """
     _validate_twilio_signature()
 
     body = (request.form.get("Body") or "").strip()
     from_number = (request.form.get("From") or "").replace("whatsapp:", "")
-
-    # Whitelist opcional
-    if ALLOW_LIST and from_number not in ALLOW_LIST:
-        resp = MessagingResponse()
-        resp.message("❌ Número não autorizado.")
-        return str(resp)
-
-    # Idempotência por MessageSid (evita duplicação)
     msg_sid = request.form.get("MessageSid")
+
+    # ⚙️ Controle de duplicação
     cache_key = os.path.join("/tmp", f"msg_{msg_sid}") if msg_sid else None
     if cache_key and os.path.exists(cache_key):
         resp = MessagingResponse()
@@ -77,50 +67,79 @@ def whats():
 
     app.logger.info("Msg de %s: %s", from_number, body)
 
-    # Comando simples
-    if body.lower() in {"help", "ajuda", "menu"}:
+    # ⚙️ Verifica lista de números permitidos (opcional)
+    if ALLOW_LIST and from_number not in ALLOW_LIST:
         resp = MessagingResponse()
-        resp.message("Envie algo como: 'reunião com Joana amanhã às 14h'")
+        resp.message("❌ Número não autorizado para usar o agendador.")
         return str(resp)
 
-    # --------------------------------------------------------
-    # BLOCO PRINCIPAL (IA + FALLBACK)
-    # --------------------------------------------------------
     resp = MessagingResponse()
+
+    # 📚 Comandos simples
+    if body.lower() in {"help", "ajuda", "menu"}:
+        resp.message(
+            "📅 *Agendador WhatsApp*\n\n"
+            "Envie mensagens como:\n"
+            "• reunião com João amanhã às 14h\n"
+            "• jantar com Maria hoje às 20h\n"
+            "• call com equipe dia 24 às 16h30\n\n"
+            "O evento será criado no seu Google Calendar automaticamente ✅"
+        )
+        return str(resp)
+
+    # ==================================================
+    # 🧩 PROCESSAMENTO PRINCIPAL
+    # ==================================================
     try:
-        # 🔹 Interpreta o texto via IA
+        # 1️⃣ Tenta interpretar via IA
         parsed = interpretar_prompt(body)
         data = parsed.get("data")
         hora = parsed.get("hora")
 
-        # 🔹 Só usa fallback se a IA não retornar data/hora válidas
+        # 2️⃣ Se a IA não entendeu data/hora, usa fallback manual
         if not data or not hora:
             app.logger.warning("⚠️ IA não retornou data/hora — ativando fallback manual.")
             data, hora = resolver_datetime_pt(body)
         else:
             app.logger.info(f"✅ Usando data/hora da IA: {data} {hora}")
 
-        # 🔹 Cria o evento no Google Calendar
+        # 3️⃣ Cria o evento no Google Calendar
         ev = criar_evento(
-            parsed["titulo"],
-            data,
-            hora,
-            int(parsed.get("duracao_min", 60)),
-            parsed.get("participantes", []),
-            parsed.get("descricao", "")
+            titulo=parsed.get("titulo"),
+            data_inicio=data,
+            hora_inicio=hora,
+            duracao_min=parsed.get("duracao_min", 60),
+            participantes=parsed.get("participantes", []),
+            descricao=parsed.get("descricao", "")
         )
 
-        resp.message(f"✅ Evento criado!\n• {parsed['titulo']}\n• {data} {hora}")
+        evento_url = ev.get("htmlLink", "")
+        resp.message(
+            f"✅ *Evento criado com sucesso!*\n"
+            f"• {parsed.get('titulo')}\n"
+            f"• {data} {hora}\n"
+            f"🔗 {evento_url if evento_url else '(sem link)'}"
+        )
+        app.logger.info(f"🎉 Evento criado: {parsed.get('titulo')} em {data} {hora}")
 
     except Exception as e:
-        app.logger.exception("Erro: %s", e)
-        resp.message("❌ Não consegui agendar. Tente: 'reunião com João amanhã às 10h30'.")
+        app.logger.exception("Erro ao processar mensagem: %s", e)
+        resp.message("❌ Ocorreu um erro ao criar o evento. Tente: 'reunião com João amanhã às 10h30'.")
 
     return str(resp)
 
-# --------------------------------------------------------
-# HEALTHCHECK
-# --------------------------------------------------------
+
+# ======================================================
+# 🩺 HEALTHCHECK
+# ======================================================
 @app.get("/")
 def root():
     return "OK", 200
+
+
+# ======================================================
+# 🚀 EXECUÇÃO LOCAL (modo debug)
+# ======================================================
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, debug=True)
