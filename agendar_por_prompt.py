@@ -56,84 +56,75 @@ def get_calendar_service():
 # --------------------------------------------------------
 # INTERPRETAÇÃO DO TEXTO (OpenAI)
 # --------------------------------------------------------
-def interpretar_prompt(prompt: str) -> dict:
-    if not client:
-        return {"titulo": "Reunião", "data": None, "hora": None, "duracao_min": 60, "participantes": [], "descricao": ""}
 
-    system = """
-    Você é um assistente que interpreta textos em português descrevendo compromissos e eventos.
-    Retorne SOMENTE um JSON válido no formato:
-    {
-      "titulo": "Reunião com João",
-      "data": "YYYY-MM-DD",
-      "hora": "HH:MM",
-      "duracao_min": 60,
-      "participantes": ["email@dominio"],
-      "descricao": ""
-    }
-
-    Regras importantes:
-    - Sempre converta palavras como "hoje", "amanhã", "depois de amanhã" ou "segunda" em uma data real (YYYY-MM-DD).
-    - O fuso horário é de São Paulo (UTC-3).
-    - Se o texto disser "às 20h30", converta para "20:30".
-    - Se o texto disser "10h", "10h00", ou "10:00", converta para "10:00".
-    - Se não houver horário, use "14:00".
-    - Se não houver duração, use 60.
-    - Se não houver e-mails, use uma lista vazia.
-    - Responda SOMENTE com JSON. Nenhum texto fora das chaves.
+def interpretar_prompt(prompt: str):
     """
+    Interpreta o texto do usuário (ex: 'reunião com João amanhã às 15h')
+    e retorna um dicionário com título, data e hora interpretados.
+    """
+    tz = pytz.timezone("America/Sao_Paulo")
+    hoje = datetime.now(tz).date()
+    ano_atual = hoje.year
 
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.1
-    )
-
-    content = resp.choices[0].message.content.strip()
-
-    # --- Tenta interpretar o JSON ---
     try:
-        data = json.loads(content)
-    except Exception:
-        m = re.search(r"\{[\s\S]*\}", content)
-        if not m:
-            raise ValueError(f"IA não retornou JSON válido: {content}")
-        data = json.loads(m.group(0))
+        # 🧠 Chamada para IA interpretar prompt
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
 
-    # --- Garante campos padrão ---
-    data.setdefault("titulo", "Reunião")
-    data.setdefault("data", None)
-    data.setdefault("hora", None)
-    data.setdefault("duracao_min", 60)
-    data.setdefault("participantes", [])
-    data.setdefault("descricao", "")
+        body = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": "Você é um assistente que extrai dados de eventos (título, data, hora) de frases em português."},
+                {"role": "user", "content": f"Extraia da frase abaixo as informações estruturadas:\n\nFrase: '{prompt}'\n\nResponda em JSON com os campos: titulo, data (AAAA-MM-DD), hora (HH:MM), duracao_min, participantes (lista) e descricao."}
+            ],
+            "temperature": 0.2
+        }
 
-    # --- LOG DE DEBUG ---
-    print("🧩 Saída da IA:", json.dumps(data, ensure_ascii=False, indent=2))
+        response = httpx.post("https://api.openai.com/v1/chat/completions", headers=headers, json=body, timeout=20)
+        data = response.json()
 
-    # --- NOVO: valida se data e hora estão realmente presentes ---
-    if not data.get("data") or not data.get("hora"):
-        print("⚠️ IA não retornou data/hora — ativando fallback manual.")
-    else:
-        # ✅ Corrige o ano se vier no passado
-        tz = pytz.timezone("America/Sao_Paulo")
-        now = datetime.now(tz)
-        try:
-            parsed_date = datetime.strptime(data["data"], "%Y-%m-%d").date()
-            if parsed_date.year < now.year:
-                new_date = parsed_date.replace(year=now.year)
-                data["data"] = new_date.strftime("%Y-%m-%d")
-                print(f"🔧 Corrigido ano da data para {data['data']}")
-        except Exception as e:
-            print(f"⚠️ Erro ao ajustar ano: {e}")
+        conteudo = data["choices"][0]["message"]["content"].strip()
+        parsed = json.loads(conteudo)
 
-    print(f"✅ IA interpretou corretamente: {data['data']} {data['hora']}")
+        # Campos principais
+        data_str = parsed.get("data")
+        hora_str = parsed.get("hora")
 
+        # ---------------------------
+        # 🔧 CORREÇÃO DE ANO
+        # ---------------------------
+        if data_str:
+            try:
+                dt = datetime.strptime(data_str, "%Y-%m-%d")
+                if dt.year < ano_atual:
+                    dt = dt.replace(year=ano_atual)
+                    parsed["data"] = dt.strftime("%Y-%m-%d")
+                    print(f"🔧 Corrigido ano da data para {parsed['data']}")
+            except Exception:
+                pass
 
-    return data
+        # ---------------------------
+        # 🔧 CORREÇÃO "HOJE" / "AMANHÃ"
+        # ---------------------------
+        if "hoje" in prompt.lower():
+            parsed["data"] = hoje.strftime("%Y-%m-%d")
+            print(f"🔧 Corrigido 'hoje' → {parsed['data']}")
+        elif "amanha" in prompt.lower() or "amanhã" in prompt.lower():
+            parsed["data"] = (hoje + timedelta(days=1)).strftime("%Y-%m-%d")
+            print(f"🔧 Corrigido 'amanhã' → {parsed['data']}")
+
+        # ---------------------------
+        # ✅ LOG FINAL
+        # ---------------------------
+        print("🧩 Saída da IA:", json.dumps(parsed, indent=2, ensure_ascii=False))
+        return parsed
+
+    except Exception as e:
+        print(f"❌ Erro ao interpretar prompt: {e}")
+        return {"titulo": prompt, "data": None, "hora": None, "duracao_min": 60, "participantes": [], "descricao": ""}
+
 
 # --------------------------------------------------------
 # INTERPRETAÇÃO DE DATA/HORA (PORTUGUÊS)
