@@ -6,8 +6,8 @@ from flask import Flask, request, abort
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.request_validator import RequestValidator
 
-# Importa as funções principais do agendador
-from agendar_por_prompt import interpretar_prompt, resolver_datetime_pt, criar_evento
+# Funções principais do agendador
+from agendar_por_prompt import interpretar_prompt, criar_evento
 
 # ======================================================
 # 🔧 CONFIGURAÇÃO INICIAL
@@ -27,10 +27,10 @@ validator = RequestValidator(AUTH_TOKEN) if AUTH_TOKEN else None
 
 
 # ======================================================
-# 🧾 FUNÇÃO DE VALIDAÇÃO DE SEGURANÇA
+# 🧾 VALIDAÇÃO DE SEGURANÇA
 # ======================================================
 def _validate_twilio_signature():
-    """Valida a assinatura de segurança da Twilio"""
+    """Valida a assinatura da Twilio"""
     if not validator:
         app.logger.warning("Validator desabilitado (AUTH_TOKEN ausente).")
         return
@@ -47,16 +47,14 @@ def _validate_twilio_signature():
 # ======================================================
 @app.post("/whats")
 def whats():
-    """
-    Recebe mensagens do WhatsApp, interpreta a frase com IA e agenda no Google Calendar.
-    """
+    """Recebe mensagens, interpreta com IA e agenda no Google Calendar"""
     _validate_twilio_signature()
 
     body = (request.form.get("Body") or "").strip()
     from_number = (request.form.get("From") or "").replace("whatsapp:", "")
     msg_sid = request.form.get("MessageSid")
 
-    # ⚙️ Controle de duplicação
+    # ⚙️ Evita duplicação
     cache_key = os.path.join("/tmp", f"msg_{msg_sid}") if msg_sid else None
     if cache_key and os.path.exists(cache_key):
         resp = MessagingResponse()
@@ -67,7 +65,7 @@ def whats():
 
     app.logger.info("Msg de %s: %s", from_number, body)
 
-    # ⚙️ Verifica lista de números permitidos (opcional)
+    # ⚙️ Autorização opcional
     if ALLOW_LIST and from_number not in ALLOW_LIST:
         resp = MessagingResponse()
         resp.message("❌ Número não autorizado para usar o agendador.")
@@ -75,7 +73,7 @@ def whats():
 
     resp = MessagingResponse()
 
-    # 📚 Comandos simples
+    # 📚 Comando de ajuda
     if body.lower() in {"help", "ajuda", "menu"}:
         resp.message(
             "📅 *Agendador WhatsApp*\n\n"
@@ -83,7 +81,7 @@ def whats():
             "• reunião com João amanhã às 14h\n"
             "• jantar com Maria hoje às 20h\n"
             "• call com equipe dia 24 às 16h30\n\n"
-            "O evento será criado no seu Google Calendar automaticamente ✅"
+            "O evento será criado automaticamente no Google Calendar ✅"
         )
         return str(resp)
 
@@ -91,19 +89,14 @@ def whats():
     # 🧩 PROCESSAMENTO PRINCIPAL
     # ==================================================
     try:
-        # 1️⃣ Tenta interpretar via IA
         parsed = interpretar_prompt(body)
         data = parsed.get("data")
         hora = parsed.get("hora")
 
-        # 2️⃣ Se a IA não entendeu data/hora, usa fallback manual
         if not data or not hora:
-            app.logger.warning("⚠️ IA não retornou data/hora — ativando fallback manual.")
-            data, hora = resolver_datetime_pt(body)
-        else:
-            app.logger.info(f"✅ Usando data/hora da IA: {data} {hora}")
+            app.logger.error("❌ IA não retornou data/hora válidas.")
+            raise ValueError("Interpretação falhou: data ou hora ausentes.")
 
-        # 3️⃣ Cria o evento no Google Calendar
         ev = criar_evento(
             titulo=parsed.get("titulo"),
             data_inicio=data,
@@ -124,7 +117,7 @@ def whats():
 
     except Exception as e:
         app.logger.exception("Erro ao processar mensagem: %s", e)
-        resp.message("❌ Ocorreu um erro ao criar o evento. Tente: 'reunião com João amanhã às 10h30'.")
+        resp.message("❌ Não consegui agendar. Tente: 'reunião com João amanhã às 10h30'.")
 
     return str(resp)
 
@@ -138,7 +131,7 @@ def root():
 
 
 # ======================================================
-# 🚀 EXECUÇÃO LOCAL (modo debug)
+# 🚀 EXECUÇÃO LOCAL (debug)
 # ======================================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
