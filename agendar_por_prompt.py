@@ -139,9 +139,29 @@ def interpretar_prompt(prompt: str):
 # ======================================================
 # 📆 CRIAÇÃO DO EVENTO NO GOOGLE CALENDAR
 # ======================================================
+# ======================================================
+# 📆 CRIAÇÃO DO EVENTO NO GOOGLE CALENDAR (com suporte a eventos de dia inteiro)
+# ======================================================
 def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, descricao):
-    """Cria o evento no Google Calendar"""
+    """Cria evento no Google Calendar (com suporte a dia inteiro)"""
     fuso = pytz.timezone(TZ)
+
+    service = get_calendar_service()
+
+    # 🧠 Se hora for vazia → evento de dia inteiro
+    if not hora_inicio or str(hora_inicio).strip() == "":
+        body = {
+            "summary": titulo or "Evento",
+            "description": descricao or "",
+            "start": {"date": data_inicio},   # 👈 usa "date", não "dateTime"
+            "end": {"date": data_inicio},     # evento de um dia
+            "attendees": [{"email": e} for e in (participantes or []) if "@" in e],
+        }
+        ev = service.events().insert(calendarId="primary", body=body).execute()
+        print(f"✅ Evento de dia inteiro criado: {ev.get('htmlLink')}")
+        return ev
+
+    # ⏰ Caso normal com horário definido
     inicio = fuso.localize(datetime.strptime(f"{data_inicio} {hora_inicio}", "%Y-%m-%d %H:%M"))
     fim = inicio + timedelta(minutes=int(duracao_min or 60))
 
@@ -153,7 +173,6 @@ def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, d
         "attendees": [{"email": e} for e in (participantes or []) if "@" in e],
     }
 
-    service = get_calendar_service()
     ev = service.events().insert(calendarId="primary", body=body).execute()
     print(f"✅ Evento criado: {ev.get('htmlLink')}")
     return ev
