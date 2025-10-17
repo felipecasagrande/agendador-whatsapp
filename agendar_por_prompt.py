@@ -67,21 +67,31 @@ def get_calendar_service():
 # ======================================================
 # 🧠 INTERPRETAÇÃO DE TEXTO (IA OpenAI)
 # ======================================================
+# ======================================================
+# 🧠 INTERPRETAÇÃO DE TEXTO (IA OpenAI)
+# ======================================================
 def interpretar_prompt(prompt: str):
     """
     Interpreta o texto do usuário (ex: 'reunião com João amanhã às 15h')
     e retorna um dicionário com título, data e hora interpretados.
     """
+
     tz = pytz.timezone(TZ)
     hoje = datetime.now(tz).date()
     ano_atual = hoje.year
 
     try:
-        if not OPENAI_TOKEN:
-            raise ValueError("OPENAI_TOKEN não definido no ambiente.")
+        # 🔑 Obtém token de forma dinâmica (garante leitura no Render)
+        token = os.getenv("OPENAI_TOKEN", "").strip()
+        if not token:
+            raise ValueError("OPENAI_TOKEN não encontrado no ambiente Render.")
 
+        # 🔧 Log seguro (mostra só início do token)
+        print(f"✅ Token OpenAI ativo (prefixo): {token[:15]}")
+
+        # 📤 Monta requisição à API
         headers = {
-            "Authorization": f"Bearer {OPENAI_TOKEN}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         }
 
@@ -108,21 +118,30 @@ def interpretar_prompt(prompt: str):
             "temperature": 0.2,
         }
 
+        # 🚀 Chamada à API OpenAI
+        print(f"🧠 Enviando para IA → {prompt}")
         response = httpx.post(
             "https://api.openai.com/v1/chat/completions",
             headers=headers,
             json=body,
-            timeout=20,
+            timeout=25,
         )
+
+        # 📥 Resposta da IA
         data = response.json()
+
+        # 🧩 Log bruto (opcional)
+        if "error" in data:
+            print("❌ Erro retornado pela IA:", json.dumps(data, indent=2, ensure_ascii=False))
+            raise ValueError(data["error"].get("message", "Erro desconhecido da OpenAI"))
+
         conteudo = data["choices"][0]["message"]["content"].strip()
         parsed = json.loads(conteudo)
 
-        # Campos principais
-        data_str = parsed.get("data")
-        hora_str = parsed.get("hora")
-
+        # ----------------------------
         # 🔧 Correção de ano
+        # ----------------------------
+        data_str = parsed.get("data")
         if data_str:
             try:
                 dt = datetime.strptime(data_str, "%Y-%m-%d")
@@ -133,7 +152,9 @@ def interpretar_prompt(prompt: str):
             except Exception:
                 pass
 
-        # 🔧 Correção para “hoje” e “amanhã”
+        # ----------------------------
+        # 🔧 Correção “hoje” e “amanhã”
+        # ----------------------------
         if "hoje" in prompt.lower():
             parsed["data"] = hoje.strftime("%Y-%m-%d")
             print(f"🔧 Corrigido 'hoje' → {parsed['data']}")
@@ -141,7 +162,12 @@ def interpretar_prompt(prompt: str):
             parsed["data"] = (hoje + timedelta(days=1)).strftime("%Y-%m-%d")
             print(f"🔧 Corrigido 'amanhã' → {parsed['data']}")
 
-        print("🧩 Saída da IA:", json.dumps(parsed, indent=2, ensure_ascii=False))
+        # ----------------------------
+        # 🧾 Log final de interpretação
+        # ----------------------------
+        print("🧩 Saída da IA:")
+        print(json.dumps(parsed, indent=2, ensure_ascii=False))
+
         return parsed
 
     except Exception as e:
@@ -154,6 +180,7 @@ def interpretar_prompt(prompt: str):
             "participantes": [],
             "descricao": "",
         }
+
 
 
 # ======================================================
