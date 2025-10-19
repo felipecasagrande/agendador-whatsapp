@@ -80,7 +80,8 @@ def whats():
             "Envie mensagens como:\n"
             "• reunião com João amanhã às 14h\n"
             "• jantar com Maria hoje às 20h\n"
-            "• call com equipe dia 24 às 16h30\n\n"
+            "• call com equipe dia 24 às 16h30\n"
+            "• comprar pão amanhã (evento de dia inteiro)\n\n"
             "O evento será criado automaticamente no Google Calendar ✅"
         )
         return str(resp)
@@ -93,9 +94,10 @@ def whats():
         data = parsed.get("data")
         hora = parsed.get("hora")
 
-        if not data or not hora:
-            app.logger.error("❌ IA não retornou data/hora válidas.")
-            raise ValueError("Interpretação falhou: data ou hora ausentes.")
+        # ✅ Agora aceita eventos de dia inteiro (sem hora)
+        if not data:
+            app.logger.error("❌ IA não retornou data válida.")
+            raise ValueError("Interpretação falhou: data ausente.")
 
         ev = criar_evento(
             titulo=parsed.get("titulo"),
@@ -107,13 +109,16 @@ def whats():
         )
 
         evento_url = ev.get("htmlLink", "")
+        hora_txt = hora if hora else "(dia inteiro)"
+
         resp.message(
             f"✅ *Evento criado com sucesso!*\n"
             f"• {parsed.get('titulo')}\n"
-            f"• {data} {hora}\n"
+            f"• {data} {hora_txt}\n"
             f"🔗 {evento_url if evento_url else '(sem link)'}"
         )
-        app.logger.info(f"🎉 Evento criado: {parsed.get('titulo')} em {data} {hora}")
+
+        app.logger.info(f"🎉 Evento criado: {parsed.get('titulo')} em {data} {hora_txt}")
 
     except Exception as e:
         app.logger.exception("Erro ao processar mensagem: %s", e)
