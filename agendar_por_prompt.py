@@ -56,6 +56,11 @@ def get_calendar_service():
 # 🧠 INTERPRETAÇÃO DE TEXTO (IA OpenAI)
 # ======================================================
 def interpretar_prompt(prompt: str):
+    """
+    Usa GPT-4o-mini para interpretar frases e retornar:
+    titulo, data, hora, duracao_min, participantes, descricao
+    Também reconhece formatos como 'de 21h às 22h', 'entre 9h e 10h30', etc.
+    """
     tz = pytz.timezone(TZ)
     hoje = datetime.now(tz).date()
 
@@ -65,20 +70,28 @@ def interpretar_prompt(prompt: str):
             raise ValueError("OPENAI_TOKEN ausente no ambiente.")
         print(f"✅ Token OpenAI ativo (prefixo): {token[:15]}")
 
+        # -------- IA base para extração --------
         exemplos = [
             {"input": "reunião com João amanhã às 10h30",
-             "output": {"titulo": "Reunião com João", "data": "amanhã", "hora": "10:30"}},
+             "output": {"titulo": "Reunião com João", "data": "amanhã", "hora": "10:30", "duracao_min": 60, "participantes": [], "descricao": ""}},
             {"input": "jantar com Maria hoje às 20h",
-             "output": {"titulo": "Jantar com Maria", "data": "hoje", "hora": "20:00"}},
+             "output": {"titulo": "Jantar com Maria", "data": "hoje", "hora": "20:00", "duracao_min": 60, "participantes": [], "descricao": ""}},
             {"input": "call com equipe dia 22 às 09h45",
-             "output": {"titulo": "Call com equipe", "data": "2025-10-22", "hora": "09:45"}}
+             "output": {"titulo": "Call com equipe", "data": "2025-10-22", "hora": "09:45", "duracao_min": 60, "participantes": [], "descricao": ""}},
+            {"input": "❤️⏳🏠 de 21h25 até 22h25 enviar para convidado britto.marilia@gmail.com",
+             "output": {"titulo": "❤️⏳🏠", "data": "hoje", "hora": "21:25", "duracao_min": 60, "participantes": ["britto.marilia@gmail.com"], "descricao": ""}}
         ]
 
         prompt_base = (
-            "Você é um assistente que interpreta frases de agendamento em português e responde **somente** em JSON.\n"
-            "Se o usuário disser 'hoje' ou 'amanhã', mantenha exatamente essas palavras.\n"
-            "Se ele disser 'de X até Y', calcule a duração aproximada em minutos.\n"
-            "O formato deve ser:\n"
+            "Você é um assistente que interpreta frases de agendamento em português e responde **somente** em JSON válido.\n"
+            "Identifique:\n"
+            "• Título (texto principal)\n"
+            "• Data (AAAA-MM-DD ou as palavras 'hoje'/'amanhã')\n"
+            "• Hora inicial ('HH:MM')\n"
+            "• Duração em minutos (calcule se o usuário disser 'de X até Y', 'das X às Y', 'entre X e Y')\n"
+            "• Participantes (qualquer e-mail presente na frase)\n"
+            "• Descrição (informações adicionais)\n\n"
+            "Formato de saída JSON:\n"
             "{\n"
             '  "titulo": "texto",\n'
             '  "data": "AAAA-MM-DD ou hoje/amanhã",\n'
@@ -95,7 +108,7 @@ def interpretar_prompt(prompt: str):
         body = {
             "model": "gpt-4o-mini",
             "messages": [
-                {"role": "system", "content": "Retorne apenas JSON válido, sem explicações."},
+                {"role": "system", "content": "Responda apenas com JSON puro, sem comentários ou explicações."},
                 {"role": "user", "content": prompt_base},
             ],
             "temperature": 0.1,
@@ -111,11 +124,17 @@ def interpretar_prompt(prompt: str):
 
         parsed = json.loads(conteudo)
 
-        # Corrige “hoje” / “amanhã” para datas reais
+        # -------- Correções pós-IA --------
         if parsed.get("data") == "hoje":
             parsed["data"] = hoje.strftime("%Y-%m-%d")
         elif parsed.get("data") in ("amanha", "amanhã"):
             parsed["data"] = (hoje + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        # Corrige formato da hora
+        hora = parsed.get("hora", "")
+        if hora and not ":" in hora:
+            hora = hora.replace("h", ":").zfill(5)
+            parsed["hora"] = hora
 
         print("🧩 Saída final da IA:")
         print(json.dumps(parsed, indent=2, ensure_ascii=False))
@@ -134,15 +153,16 @@ def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, d
     fuso = pytz.timezone(TZ)
     hoje = datetime.now(fuso).date()
 
-    # 🔧 Converte "hoje"/"amanhã" se vierem da IA
-    if data_inicio.lower() in ("hoje",):
-        data_inicio = hoje.strftime("%Y-%m-%d")
-    elif data_inicio.lower() in ("amanha", "amanhã"):
-        data_inicio = (hoje + timedelta(days=1)).strftime("%Y-%m-%d")
+    # 🔧 Converte “hoje” / “amanhã”
+    if isinstance(data_inicio, str):
+        if data_inicio.lower() in ("hoje",):
+            data_inicio = hoje.strftime("%Y-%m-%d")
+        elif data_inicio.lower() in ("amanha", "amanhã"):
+            data_inicio = (hoje + timedelta(days=1)).strftime("%Y-%m-%d")
 
     service = get_calendar_service()
 
-    # 🧠 Se hora for vazia → evento de dia inteiro
+    # 🧠 Evento de dia inteiro
     if not hora_inicio or str(hora_inicio).strip() == "":
         body = {
             "summary": titulo or "Evento",
@@ -155,7 +175,7 @@ def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, d
         print(f"✅ Evento de dia inteiro criado: {ev.get('htmlLink')}")
         return ev
 
-    # ⏰ Caso normal com horário definido
+    # ⏰ Evento com hora e duração
     inicio = fuso.localize(datetime.strptime(f"{data_inicio} {hora_inicio}", "%Y-%m-%d %H:%M"))
     fim = inicio + timedelta(minutes=int(duracao_min or 60))
 
