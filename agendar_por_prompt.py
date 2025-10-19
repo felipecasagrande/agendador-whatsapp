@@ -70,7 +70,6 @@ def interpretar_prompt(prompt: str):
             raise ValueError("OPENAI_TOKEN ausente no ambiente.")
         print(f"✅ Token OpenAI ativo (prefixo): {token[:15]}")
 
-        # -------- IA base para extração --------
         exemplos = [
             {"input": "reunião com João amanhã às 10h30",
              "output": {"titulo": "Reunião com João", "data": "amanhã", "hora": "10:30", "duracao_min": 60, "participantes": [], "descricao": ""}},
@@ -124,13 +123,13 @@ def interpretar_prompt(prompt: str):
 
         parsed = json.loads(conteudo)
 
-        # -------- Correções pós-IA --------
+        # Corrige “hoje” / “amanhã”
         if parsed.get("data") == "hoje":
             parsed["data"] = hoje.strftime("%Y-%m-%d")
         elif parsed.get("data") in ("amanha", "amanhã"):
             parsed["data"] = (hoje + timedelta(days=1)).strftime("%Y-%m-%d")
 
-        # Corrige formato da hora
+        # Corrige formato de hora
         hora = parsed.get("hora", "")
         if hora and not ":" in hora:
             hora = hora.replace("h", ":").zfill(5)
@@ -164,13 +163,16 @@ def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, d
 
     # 🧠 Evento de dia inteiro
     if not hora_inicio or str(hora_inicio).strip() == "":
+        data_fim = (datetime.strptime(data_inicio, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+
         body = {
             "summary": titulo or "Evento",
             "description": descricao or "",
             "start": {"date": data_inicio},
-            "end": {"date": data_inicio},
+            "end": {"date": data_fim},  # Google requer +1 dia no fim
             "attendees": [{"email": e} for e in (participantes or []) if "@" in e],
         }
+
         ev = service.events().insert(calendarId="primary", body=body).execute()
         print(f"✅ Evento de dia inteiro criado: {ev.get('htmlLink')}")
         return ev
