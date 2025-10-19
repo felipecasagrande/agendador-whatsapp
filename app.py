@@ -122,7 +122,7 @@ def whats():
 
     except Exception as e:
         app.logger.exception("Erro ao processar mensagem: %s", e)
-        resp.message("❌ Não consegui agendar. Tente: 'reunião com João amanhã às 10h30'.")
+        resp.message("❌ Não  consegui agendar. Tente: 'reunião com João amanhã às 10h30'.")
 
     return str(resp)
 
