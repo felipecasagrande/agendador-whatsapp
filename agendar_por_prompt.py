@@ -164,18 +164,20 @@ def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, d
     # 🧠 Evento de dia inteiro
     if not hora_inicio or str(hora_inicio).strip() == "":
         data_fim = (datetime.strptime(data_inicio, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-
+    
         body = {
             "summary": titulo or "Evento",
             "description": descricao or "",
             "start": {"date": data_inicio},
             "end": {"date": data_fim},  # Google requer +1 dia no fim
             "attendees": [{"email": e} for e in (participantes or []) if "@" in e],
+            "transparency": "opaque",  # visível como ocupado
         }
-
+    
         ev = service.events().insert(calendarId="primary", body=body).execute()
         print(f"✅ Evento de dia inteiro criado: {ev.get('htmlLink')}")
         return ev
+
 
     # ⏰ Evento com hora e duração
     inicio = fuso.localize(datetime.strptime(f"{data_inicio} {hora_inicio}", "%Y-%m-%d %H:%M"))
