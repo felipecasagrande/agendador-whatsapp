@@ -141,7 +141,9 @@ def interpretar_prompt(prompt: str):
 # 📆 CRIAÇÃO DO EVENTO NO GOOGLE CALENDAR
 # ======================================================
 def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, descricao):
-    """Cria evento no Google Calendar (suporta dia inteiro corretamente)"""
+    """Cria evento no Google Calendar:
+       - Dia inteiro → sem notificações
+       - Com hora → com lembretes padrão do Google"""
     fuso = pytz.timezone(TZ)
     hoje = datetime.now(fuso).date()
 
@@ -154,7 +156,7 @@ def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, d
 
     service = get_calendar_service()
 
-    # Evento de dia inteiro
+    # 🧭 Evento de dia inteiro (sem hora definida)
     if not hora_inicio or str(hora_inicio).strip() == "":
         data_fim = (datetime.strptime(data_inicio, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -165,13 +167,15 @@ def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, d
             "end": {"date": data_fim},
             "attendees": [{"email": e} for e in (participantes or []) if "@" in e],
             "transparency": "opaque",
+            # 🚫 sem notificações
+            "reminders": {"useDefault": False},
         }
 
         ev = service.events().insert(calendarId="primary", body=body).execute()
-        print(f"✅ Evento de dia inteiro criado: {ev.get('htmlLink')}")
+        print(f"✅ Evento de dia inteiro criado (sem notificações): {ev.get('htmlLink')}")
         return ev
 
-    # Evento com hora
+    # ⏰ Evento com hora e duração definida
     inicio = fuso.localize(datetime.strptime(f"{data_inicio} {hora_inicio}", "%Y-%m-%d %H:%M"))
     fim = inicio + timedelta(minutes=int(duracao_min or 60))
 
@@ -181,8 +185,10 @@ def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, d
         "start": {"dateTime": inicio.isoformat(), "timeZone": TZ},
         "end": {"dateTime": fim.isoformat(), "timeZone": TZ},
         "attendees": [{"email": e} for e in (participantes or []) if "@" in e],
+        # ✅ mantém notificações padrão do Google
+        "reminders": {"useDefault": True},
     }
 
     ev = service.events().insert(calendarId="primary", body=body).execute()
-    print(f"✅ Evento criado: {ev.get('htmlLink')}")
+    print(f"✅ Evento com hora criado (com notificações padrão): {ev.get('htmlLink')}")
     return ev
