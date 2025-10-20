@@ -58,7 +58,7 @@ def get_calendar_service():
 def interpretar_prompt(prompt: str):
     """
     Usa GPT-4o-mini para interpretar frases e retornar:
-    titulo, data, hora, duracao_min, participantes, descricao
+    titulo, data, hora, duracao_min, participantes, descricao, colorId
     """
     tz = pytz.timezone(TZ)
     hoje = datetime.now(tz).date()
@@ -128,25 +128,41 @@ def interpretar_prompt(prompt: str):
         elif parsed.get("data") in ("amanha", "amanhã"):
             parsed["data"] = (hoje + timedelta(days=1)).strftime("%Y-%m-%d")
 
-        # 💌 Regra personalizada: se o usuário disser "convide amor"
+        # 💌 Regra personalizada: "convide amor"
         if "convide amor" in prompt.lower():
             convidados = parsed.get("participantes", [])
             if "britto.marilia@gmail.com" not in convidados:
                 convidados.append("britto.marilia@gmail.com")
             parsed["participantes"] = convidados
-        
-        # 🗓️ Se não houver data, definir como "hoje" por padrão
+
+        # 🗓️ Se não houver data, define como hoje
         if not parsed.get("data"):
             parsed["data"] = hoje.strftime("%Y-%m-%d")
-        
-        # ⏰ Se não houver hora, tratar como evento de dia inteiro
+
+        # ⏰ Se não houver hora, trata como evento de dia inteiro
         if not parsed.get("hora"):
             parsed["hora"] = ""
-        
+
+        # 🎨 Detecta cor personalizada ou usa azul padrão
+        cor_map = {
+            "#azul": "1",
+            "#roxo": "3",
+            "#verde": "10",
+            "#amarelo": "5",
+            "#laranja": "6",
+            "#rosa": "9",
+            "#cinza": "8",
+            "#vermelho": "11"
+        }
+        parsed["colorId"] = "1"  # padrão azul
+        for tag, code in cor_map.items():
+            if tag in prompt.lower():
+                parsed["colorId"] = code
+                break
+
         print("🧩 Saída final da IA:")
         print(json.dumps(parsed, indent=2, ensure_ascii=False))
         return parsed
-
 
     except Exception as e:
         print(f"❌ Erro ao interpretar prompt: {e}")
@@ -156,14 +172,11 @@ def interpretar_prompt(prompt: str):
 # ======================================================
 # 📆 CRIAÇÃO DO EVENTO NO GOOGLE CALENDAR
 # ======================================================
-def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, descricao):
-    """Cria evento no Google Calendar:
-       - Dia inteiro → sem notificações
-       - Com hora → com lembretes padrão do Google"""
+def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, descricao, color_id=None):
+    """Cria evento no Google Calendar (suporta cores e eventos de dia inteiro)"""
     fuso = pytz.timezone(TZ)
     hoje = datetime.now(fuso).date()
 
-    # Converte “hoje” e “amanhã”
     if isinstance(data_inicio, str):
         if data_inicio.lower() == "hoje":
             data_inicio = hoje.strftime("%Y-%m-%d")
@@ -172,10 +185,9 @@ def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, d
 
     service = get_calendar_service()
 
-    # 🧭 Evento de dia inteiro (sem hora definida)
+    # Evento de dia inteiro
     if not hora_inicio or str(hora_inicio).strip() == "":
         data_fim = (datetime.strptime(data_inicio, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-
         body = {
             "summary": titulo or "Evento",
             "description": descricao or "",
@@ -183,28 +195,29 @@ def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, d
             "end": {"date": data_fim},
             "attendees": [{"email": e} for e in (participantes or []) if "@" in e],
             "transparency": "opaque",
-            # 🚫 sem notificações
             "reminders": {"useDefault": False},
         }
+        if color_id:
+            body["colorId"] = color_id
 
         ev = service.events().insert(calendarId="primary", body=body).execute()
-        print(f"✅ Evento de dia inteiro criado (sem notificações): {ev.get('htmlLink')}")
+        print(f"✅ Evento de dia inteiro criado: {ev.get('htmlLink')}")
         return ev
 
-    # ⏰ Evento com hora e duração definida
+    # Evento com hora definida
     inicio = fuso.localize(datetime.strptime(f"{data_inicio} {hora_inicio}", "%Y-%m-%d %H:%M"))
     fim = inicio + timedelta(minutes=int(duracao_min or 60))
-
     body = {
         "summary": titulo or "Evento",
         "description": descricao or "",
         "start": {"dateTime": inicio.isoformat(), "timeZone": TZ},
         "end": {"dateTime": fim.isoformat(), "timeZone": TZ},
         "attendees": [{"email": e} for e in (participantes or []) if "@" in e],
-        # ✅ mantém notificações padrão do Google
         "reminders": {"useDefault": True},
     }
+    if color_id:
+        body["colorId"] = color_id
 
     ev = service.events().insert(calendarId="primary", body=body).execute()
-    print(f"✅ Evento com hora criado (com notificações padrão): {ev.get('htmlLink')}")
+    print(f"✅ Evento criado: {ev.get('htmlLink')}")
     return ev
