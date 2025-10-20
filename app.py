@@ -30,7 +30,6 @@ validator = RequestValidator(AUTH_TOKEN) if AUTH_TOKEN else None
 # 🧾 VALIDAÇÃO DE SEGURANÇA
 # ======================================================
 def _validate_twilio_signature():
-    """Valida a assinatura da Twilio"""
     if not validator:
         app.logger.warning("Validator desabilitado (AUTH_TOKEN ausente).")
         return
@@ -47,14 +46,12 @@ def _validate_twilio_signature():
 # ======================================================
 @app.post("/whats")
 def whats():
-    """Recebe mensagens, interpreta com IA e agenda no Google Calendar"""
     _validate_twilio_signature()
 
     body = (request.form.get("Body") or "").strip()
     from_number = (request.form.get("From") or "").replace("whatsapp:", "")
     msg_sid = request.form.get("MessageSid")
 
-    # ⚙️ Evita duplicação
     cache_key = os.path.join("/tmp", f"msg_{msg_sid}") if msg_sid else None
     if cache_key and os.path.exists(cache_key):
         resp = MessagingResponse()
@@ -65,38 +62,31 @@ def whats():
 
     app.logger.info("Msg de %s: %s", from_number, body)
 
-    # ⚙️ Autorização opcional
     if ALLOW_LIST and from_number not in ALLOW_LIST:
         resp = MessagingResponse()
-        resp.message("❌ Número não autorizado para usar o agendador.")
+        resp.message("❌ Número não autorizado.")
         return str(resp)
 
     resp = MessagingResponse()
 
-    # 📚 Comando de ajuda
     if body.lower() in {"help", "ajuda", "menu"}:
         resp.message(
             "📅 *Agendador WhatsApp*\n\n"
             "Envie mensagens como:\n"
-            "• reunião com João amanhã às 14h\n"
-            "• jantar com Maria hoje às 20h\n"
-            "• call com equipe dia 24 às 16h30\n"
-            "• comprar pão amanhã (evento de dia inteiro)\n\n"
-            "O evento será criado automaticamente no Google Calendar ✅"
+            "• reunião com João amanhã às 14h #roxo\n"
+            "• jantar com Maria hoje às 20h #laranja\n"
+            "• comprar suco amanhã #azul (dia inteiro)\n\n"
+            "💡 Se não informar cor, o evento será azul por padrão."
         )
         return str(resp)
 
-    # ==================================================
-    # 🧩 PROCESSAMENTO PRINCIPAL
-    # ==================================================
     try:
         parsed = interpretar_prompt(body)
         data = parsed.get("data")
         hora = parsed.get("hora")
+        cor = parsed.get("colorId", "1")
 
-        # ✅ Agora aceita eventos de dia inteiro (sem hora)
         if not data:
-            app.logger.error("❌ IA não retornou data válida.")
             raise ValueError("Interpretação falhou: data ausente.")
 
         ev = criar_evento(
@@ -105,7 +95,8 @@ def whats():
             hora_inicio=hora,
             duracao_min=parsed.get("duracao_min", 60),
             participantes=parsed.get("participantes", []),
-            descricao=parsed.get("descricao", "")
+            descricao=parsed.get("descricao", ""),
+            color_id=cor
         )
 
         evento_url = ev.get("htmlLink", "")
@@ -117,12 +108,11 @@ def whats():
             f"• {data} {hora_txt}\n"
             f"🔗 {evento_url if evento_url else '(sem link)'}"
         )
-
         app.logger.info(f"🎉 Evento criado: {parsed.get('titulo')} em {data} {hora_txt}")
 
     except Exception as e:
         app.logger.exception("Erro ao processar mensagem: %s", e)
-        resp.message("❌ Não  consegui agendar. Tente: 'reunião com João amanhã às 10h30'.")
+        resp.message("❌ Não consegui agendar. Tente: 'reunião com João amanhã às 10h30 #laranja'.")
 
     return str(resp)
 
@@ -132,12 +122,11 @@ def whats():
 # ======================================================
 @app.get("/")
 def root():
-    return ("", 204)  # sem texto, status 204 = No Content
-
+    return ("", 204)
 
 
 # ======================================================
-# 🚀 EXECUÇÃO LOCAL (debug)
+# 🚀 EXECUÇÃO LOCAL
 # ======================================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
