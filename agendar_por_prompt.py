@@ -128,6 +128,13 @@ def interpretar_prompt(prompt: str):
         elif parsed.get("data") in ("amanha", "amanhã"):
             parsed["data"] = (hoje + timedelta(days=1)).strftime("%Y-%m-%d")
 
+        # 💌 Regra personalizada: se o usuário disser "convide amor"
+        if "convide amor" in prompt.lower():
+        convidados = parsed.get("participantes", [])
+        if "britto.marilia@gmail.com" not in convidados:
+        convidados.append("britto.marilia@gmail.com")
+        parsed["participantes"] = convidados
+    
         print("🧩 Saída final da IA:")
         print(json.dumps(parsed, indent=2, ensure_ascii=False))
         return parsed
