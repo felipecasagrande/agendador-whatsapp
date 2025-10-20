@@ -6,7 +6,6 @@ from flask import Flask, request, abort
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.request_validator import RequestValidator
 from datetime import datetime
-import locale
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -20,7 +19,6 @@ from agendar_por_prompt import interpretar_prompt, criar_evento
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
-locale.setlocale(locale.LC_TIME, "pt_BR.UTF-8")
 
 # ======================================================
 # 🔐 TWILIO CONFIG
@@ -49,10 +47,10 @@ def _validate_twilio_signature():
 
 
 # ======================================================
-# 📅 FORMATAÇÃO LEGÍVEL DE DATA
+# 📅 FORMATAÇÃO LEGÍVEL DE DATA (sem locale)
 # ======================================================
 def formatar_data_legivel(data_str):
-    """Converte 2025-10-20 → '20 de outubro de 2025 (segunda-feira)'"""
+    """Formata data para: '20 de outubro de 2025 (segunda-feira)', ou 'hoje'/'amanhã'"""
     hoje = datetime.now().date()
     data = datetime.strptime(data_str, "%Y-%m-%d").date()
     diff = (data - hoje).days
@@ -61,8 +59,20 @@ def formatar_data_legivel(data_str):
         return "hoje"
     elif diff == 1:
         return "amanhã"
-    else:
-        return data.strftime("%d de %B de %Y (%A)").capitalize()
+
+    meses = [
+        "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+        "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"
+    ]
+    dias_semana = [
+        "segunda-feira", "terça-feira", "quarta-feira",
+        "quinta-feira", "sexta-feira", "sábado", "domingo"
+    ]
+
+    nome_mes = meses[data.month - 1]
+    nome_dia = dias_semana[data.weekday()]
+
+    return f"{data.day} de {nome_mes} de {data.year} ({nome_dia})"
 
 
 # ======================================================
