@@ -132,7 +132,7 @@ def whats():
 # ======================================================
 @app.get("/")
 def root():
-return ("", 204)  # sem texto, status 204 = No Content
+    return ("", 204)  # sem texto, status 204 = No Content
 
 
 
