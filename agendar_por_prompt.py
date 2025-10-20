@@ -134,7 +134,15 @@ def interpretar_prompt(prompt: str):
         if "britto.marilia@gmail.com" not in convidados:
         convidados.append("britto.marilia@gmail.com")
         parsed["participantes"] = convidados
-    
+
+        # Se não houver data, definir como "hoje" por padrão
+        if not parsed.get("data"):
+            parsed["data"] = hoje.strftime("%Y-%m-%d")
+        
+        # Se não houver hora, tratar como evento de dia inteiro
+        if not parsed.get("hora"):
+            parsed["hora"] = ""
+        
         print("🧩 Saída final da IA:")
         print(json.dumps(parsed, indent=2, ensure_ascii=False))
         return parsed
