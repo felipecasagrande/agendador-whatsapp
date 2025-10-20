@@ -69,6 +69,26 @@ def interpretar_prompt(prompt: str):
             raise ValueError("OPENAI_TOKEN ausente no ambiente.")
         print(f"✅ Token OpenAI ativo (prefixo): {token[:15]}")
 
+        # 🎨 Mapeamento de cores
+        cor_map = {
+            "#azul": "1",
+            "#roxo": "3",
+            "#verde": "10",
+            "#amarelo": "5",
+            "#laranja": "6",
+            "#rosa": "9",
+            "#cinza": "8",
+            "#vermelho": "11"
+        }
+
+        # 🔍 Detecta e remove hashtag de cor do texto
+        cor_id = "1"  # padrão azul
+        for tag, code in cor_map.items():
+            if tag in prompt.lower():
+                cor_id = code
+                prompt = prompt.replace(tag, "").strip()
+                break
+
         exemplos = [
             {"input": "reunião com João amanhã às 10h30",
              "output": {"titulo": "Reunião com João", "data": "amanhã", "hora": "10:30"}},
@@ -143,22 +163,8 @@ def interpretar_prompt(prompt: str):
         if not parsed.get("hora"):
             parsed["hora"] = ""
 
-        # 🎨 Detecta cor personalizada ou usa azul padrão
-        cor_map = {
-            "#azul": "1",
-            "#roxo": "3",
-            "#verde": "10",
-            "#amarelo": "5",
-            "#laranja": "6",
-            "#rosa": "9",
-            "#cinza": "8",
-            "#vermelho": "11"
-        }
-        parsed["colorId"] = "1"  # padrão azul
-        for tag, code in cor_map.items():
-            if tag in prompt.lower():
-                parsed["colorId"] = code
-                break
+        # 🎨 Define cor (já detectada)
+        parsed["colorId"] = cor_id
 
         print("🧩 Saída final da IA:")
         print(json.dumps(parsed, indent=2, ensure_ascii=False))
@@ -167,6 +173,7 @@ def interpretar_prompt(prompt: str):
     except Exception as e:
         print(f"❌ Erro ao interpretar prompt: {e}")
         raise
+
 
 
 # ======================================================
