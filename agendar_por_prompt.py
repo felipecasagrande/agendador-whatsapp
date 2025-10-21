@@ -1,149 +1,139 @@
-import os
-import json
-from datetime import datetime, timedelta
-from googleapiclient.discovery import build
-from google.oauth2 import service_account
 from openai import OpenAI
+from googleapiclient.discovery import build
+from google.oauth2.service_account import Credentials
+from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
+import dateparser, pytz, json, re, os
 
-# Inicializa cliente OpenAI
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+SCOPES = ['https://www.googleapis.com/auth/calendar']
+TZ = "America/Sao_Paulo"
 
-def interpretar_prompt(prompt: str):
-    """Interpreta frase em português e retorna JSON estruturado para criar evento."""
+# Inicializa cliente OpenAI (usa variável de ambiente OPENAI_TOKEN)
+OPENAI_TOKEN = os.getenv("OPENAI_TOKEN", "")
+client = OpenAI(api_key=OPENAI_TOKEN) if OPENAI_TOKEN else None
+
+
+# ============================================================
+# 🔹 Interpretação do prompt via IA
+# ============================================================
+def interpretar_prompt(prompt: str) -> dict:
+    if not client:
+        return {"titulo": "Reunião", "duracao_min": 60, "participantes": [], "descricao": ""}
+
+    system = """
+    Responda SOMENTE JSON no formato:
+    {"titulo":"Reunião com ...","duracao_min":60,"participantes":["email@dominio"],"descricao":""}
+    - Se não houver duração, use 60.
+    - Se não houver e-mails, deixe participantes = [].
+    - NÃO inclua campos de data/hora.
+    """
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+        temperature=0.2
+    )
+    content = resp.choices[0].message.content
     try:
-        hoje = datetime.now().date()
-        parsed = {
-            "titulo": prompt,
-            "data": "",
-            "hora": "",
-            "duracao_min": 0,
-            "participantes": [],
-            "descricao": ""
-        }
-
-        # 🔧 IA ajustada — evita erro 400 “messages must contain the word JSON”
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Você é um assistente que interpreta mensagens em português "
-                        "e deve responder ESTRITAMENTE em JSON válido. "
-                        "A resposta precisa ser SOMENTE um objeto JSON contendo as chaves: "
-                        "titulo, data, hora, duracao_min, participantes e descricao."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Analise a frase abaixo e retorne APENAS um JSON válido, sem texto adicional:\n\n"
-                        f"{prompt}\n\n"
-                        "Retorne SOMENTE um objeto JSON com os campos: "
-                        "titulo, data, hora, duracao_min, participantes, descricao."
-                    ),
-                },
-            ],
-            response_format={"type": "json_object"},
-        )
-
-        parsed.update(json.loads(completion.choices[0].message.content))
-
-        # 💌 "convide amor" adiciona automaticamente o e-mail da Marília
-        if "convide amor" in prompt.lower():
-            convidados = parsed.get("participantes", [])
-            if "britto.marilia@gmail.com" not in convidados:
-                convidados.append("britto.marilia@gmail.com")
-            parsed["participantes"] = convidados
-
-        # 🎨 Mapeamento de cores
-        cor_map = {
-            "#azul": "9",
-            "#roxo": "3",
-            "#verde": "10",
-            "#amarelo": "5",
-            "#laranja": "6",
-            "#rosa": "4",
-            "#cinza": "8",
-            "#vermelho": "11"
-        }
-        parsed["colorId"] = "9"  # padrão: azul pavão
-        for cor_tag, cor_id in cor_map.items():
-            if cor_tag in prompt.lower():
-                parsed["colorId"] = cor_id
-                parsed["descricao"] = cor_tag
-                break
-
-        # 🗓️ Se não houver data → assume hoje
-        if not parsed.get("data"):
-            parsed["data"] = hoje.strftime("%Y-%m-%d")
-
-        # ⏰ Se não houver hora → evento de dia inteiro
-        if not parsed.get("hora"):
-            parsed["hora"] = ""
-
-        print("🧩 JSON final retornado pela IA:")
-        print(json.dumps(parsed, indent=2, ensure_ascii=False))
-        return parsed
-
-    except Exception as e:
-        print(f"❌ Erro ao interpretar prompt: {e}")
-        raise
+        data = json.loads(content)
+    except Exception:
+        m = re.search(r"\{[\s\S]*\}", content)
+        if not m:
+            raise ValueError("IA não retornou JSON válido.")
+        data = json.loads(m.group(0))
+    data.setdefault("titulo", "Reunião")
+    data.setdefault("duracao_min", 60)
+    data.setdefault("participantes", [])
+    data.setdefault("descricao", "")
+    return data
 
 
-def criar_evento(
-    titulo, data_inicio, hora_inicio, duracao_min=60,
-    participantes=None, descricao="", colorId="9"
-):
-    """Cria evento no Google Calendar (compatível com Render)."""
-    try:
-        SCOPES = ["https://www.googleapis.com/auth/calendar"]
+# ============================================================
+# 🔹 Resolução de data/hora em português
+# ============================================================
+WEEKDAYS_PT = {
+    "segunda": 0, "segunda-feira": 0,
+    "terca": 1, "terça": 1, "terça-feira": 1, "terca-feira": 1,
+    "quarta": 2, "quarta-feira": 2,
+    "quinta": 3, "quinta-feira": 3,
+    "sexta": 4, "sexta-feira": 4,
+    "sabado": 5, "sábado": 5,
+    "domingo": 6
+}
 
-        # ✅ Usa variável de ambiente GOOGLE_CREDENTIALS_JSON (Render)
-        creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-        if not creds_json:
-            raise ValueError("❌ Variável GOOGLE_CREDENTIALS_JSON não encontrada nas env vars.")
+def _norm(s: str) -> str:
+    return s.lower().replace("às", "as").replace("hrs", "h").replace("hs", "h").strip()
 
-        creds = service_account.Credentials.from_service_account_info(
-            json.loads(creds_json), scopes=SCOPES
-        )
-
-        service = build("calendar", "v3", credentials=creds)
-
-        # 🕒 Evento com hora definida
-        if hora_inicio:
-            inicio = f"{data_inicio}T{hora_inicio}:00"
-            fim = (
-                datetime.strptime(inicio, "%Y-%m-%dT%H:%M:%S")
-                + timedelta(minutes=duracao_min)
-            ).strftime("%Y-%m-%dT%H:%M:%S")
-
-            event = {
-                "summary": titulo,
-                "description": descricao,
-                "start": {"dateTime": inicio, "timeZone": "America/Recife"},
-                "end": {"dateTime": fim, "timeZone": "America/Recife"},
-                "colorId": colorId,
-                "attendees": [{"email": e} for e in participantes or []],
-                "reminders": {"useDefault": True},
-            }
-
-        # 📅 Evento de dia inteiro
+def resolver_datetime_pt(texto: str, default_time="14:00", tz_str=TZ):
+    tz = pytz.timezone(tz_str)
+    now = datetime.now(tz)
+    base_naive = now.replace(tzinfo=None)
+    t = _norm(texto)
+    dt = dateparser.parse(
+        t, languages=["pt"],
+        settings={"RETURN_AS_TIMEZONE_AWARE": False, "PREFER_DATES_FROM": "future", "RELATIVE_BASE": base_naive}
+    )
+    if not dt:
+        if "amanha" in t:
+            h = re.search(r"\b(\d{1,2})(?::|h)?(\d{2})?\b", t)
+            hour = int(h.group(1)) if h else int(default_time.split(":")[0])
+            minute = int(h.group(2) or 0) if h else int(default_time.split(":")[1])
+            dt = (now + relativedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0).replace(tzinfo=None)
         else:
-            event = {
-                "summary": titulo,
-                "description": descricao,
-                "start": {"date": data_inicio},
-                "end": {"date": data_inicio},
-                "colorId": colorId,
-                "attendees": [{"email": e} for e in participantes or []],
-                "reminders": {"useDefault": False},
-            }
+            dow = next((WEEKDAYS_PT[k] for k in WEEKDAYS_PT if k in t), None)
+            if dow is not None:
+                days_ahead = (dow - now.weekday()) % 7 or 7
+                h = re.search(r"\b(\d{1,2})(?::|h)?(\d{2})?\b", t)
+                hour = int(h.group(1)) if h else int(default_time.split(":")[0])
+                minute = int(h.group(2) or 0) if h else int(default_time.split(":")[1])
+                dt = (now + relativedelta(days=days_ahead)).replace(hour=hour, minute=minute, second=0, microsecond=0).replace(tzinfo=None)
+    if not dt:
+        hour, minute = map(int, default_time.split(":"))
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= now:
+            candidate += relativedelta(days=1)
+        dt = candidate.replace(tzinfo=None)
+    parsed = tz.localize(dt)
+    if parsed <= now:
+        parsed = parsed + relativedelta(days=1)
+    date_iso = parsed.strftime("%Y-%m-%d")
+    time_iso = parsed.strftime("%H:%M")
+    return date_iso, time_iso
 
-        ev = service.events().insert(calendarId="primary", body=event).execute()
-        print(f"✅ Evento criado: {titulo} em {data_inicio} {hora_inicio or '(dia inteiro)'}")
-        return ev
 
-    except Exception as e:
-        print(f"❌ Erro ao criar evento: {e}")
-        raise
+# ============================================================
+# 🔹 Criação do evento no Google Calendar (corrigido p/ Render)
+# ============================================================
+def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, descricao, colorId="1"):
+    """
+    Cria um evento no Google Calendar com suporte a cores e correção automática
+    do formato da chave privada do Render (substitui '\\n' por '\n').
+    """
+    inicio_dt = datetime.strptime(f"{data_inicio} {hora_inicio}", "%Y-%m-%d %H:%M")
+    fim_dt = inicio_dt + timedelta(minutes=int(duracao_min or 60))
+    start_iso = inicio_dt.strftime("%Y-%m-%dT%H:%M:%S")
+    end_iso = fim_dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+    # Carrega credenciais do ambiente
+    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    if not creds_json:
+        raise ValueError("❌ Variável GOOGLE_CREDENTIALS_JSON não encontrada.")
+
+    # 🔧 Corrige quebra de linha perdida no Render
+    creds_json = creds_json.replace('\\n', '\n')
+
+    creds = Credentials.from_service_account_info(json.loads(creds_json), scopes=SCOPES)
+    service = build("calendar", "v3", credentials=creds)
+
+    # Corpo do evento
+    body = {
+        "summary": titulo or "Reunião",
+        "description": descricao or "",
+        "start": {"dateTime": start_iso, "timeZone": TZ},
+        "end": {"dateTime": end_iso, "timeZone": TZ},
+        "attendees": [{"email": e} for e in (participantes or []) if "@" in e],
+        "colorId": colorId or "1"
+    }
+
+    ev = service.events().insert(calendarId="primary", body=body).execute()
+    print(f"✅ Evento criado: {ev.get('htmlLink')}")
+    return ev
