@@ -49,7 +49,7 @@ def interpretar_prompt(prompt: str):
 
         parsed.update(json.loads(completion.choices[0].message.content))
 
-        # 💌 "convide amor" adiciona automaticamente o e-mail
+        # 💌 "convide amor" adiciona automaticamente o e-mail da Marília
         if "convide amor" in prompt.lower():
             convidados = parsed.get("participantes", [])
             if "britto.marilia@gmail.com" not in convidados:
@@ -67,7 +67,7 @@ def interpretar_prompt(prompt: str):
             "#cinza": "8",
             "#vermelho": "11"
         }
-        parsed["colorId"] = "9"  # padrão: azul
+        parsed["colorId"] = "9"  # padrão: azul pavão
         for cor_tag, cor_id in cor_map.items():
             if cor_tag in prompt.lower():
                 parsed["colorId"] = cor_id
@@ -91,21 +91,33 @@ def interpretar_prompt(prompt: str):
         raise
 
 
-def criar_evento(titulo, data_inicio, hora_inicio, duracao_min=60, participantes=None, descricao="", colorId="9"):
-    """Cria evento no Google Calendar."""
+def criar_evento(
+    titulo, data_inicio, hora_inicio, duracao_min=60,
+    participantes=None, descricao="", colorId="9"
+):
+    """Cria evento no Google Calendar (compatível com Render)."""
     try:
         SCOPES = ["https://www.googleapis.com/auth/calendar"]
-        creds = service_account.Credentials.from_service_account_file(
-            "credentials.json", scopes=SCOPES
+
+        # ✅ Usa variável de ambiente GOOGLE_CREDENTIALS_JSON (Render)
+        creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+        if not creds_json:
+            raise ValueError("❌ Variável GOOGLE_CREDENTIALS_JSON não encontrada nas env vars.")
+
+        creds = service_account.Credentials.from_service_account_info(
+            json.loads(creds_json), scopes=SCOPES
         )
+
         service = build("calendar", "v3", credentials=creds)
 
+        # 🕒 Evento com hora definida
         if hora_inicio:
             inicio = f"{data_inicio}T{hora_inicio}:00"
             fim = (
                 datetime.strptime(inicio, "%Y-%m-%dT%H:%M:%S")
                 + timedelta(minutes=duracao_min)
             ).strftime("%Y-%m-%dT%H:%M:%S")
+
             event = {
                 "summary": titulo,
                 "description": descricao,
@@ -115,6 +127,8 @@ def criar_evento(titulo, data_inicio, hora_inicio, duracao_min=60, participantes
                 "attendees": [{"email": e} for e in participantes or []],
                 "reminders": {"useDefault": True},
             }
+
+        # 📅 Evento de dia inteiro
         else:
             event = {
                 "summary": titulo,
