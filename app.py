@@ -1,143 +1,132 @@
+# -*- coding: utf-8 -*-
+"""
+app.py
+Flask + Twilio webhook para WhatsApp.
+
+- Endpoint GET "/"  -> healthcheck
+- Endpoint POST "/whats" -> recebe Body do WhatsApp, interpreta e agenda no Google Calendar
+- Credenciais do Google:
+    • Preferência por variáveis de ambiente GOOGLE_CREDENTIALS_JSON e GOOGLE_TOKEN_JSON
+    • Se não existirem, usa "credentials.json" / "token.json" locais
+"""
+
 import os
 import json
-import logging
-from dotenv import load_dotenv
-from flask import Flask, request, abort
+from flask import Flask, request, Response
 from twilio.twiml.messaging_response import MessagingResponse
-from twilio.request_validator import RequestValidator
 
-# Funções principais do agendador
-from agendar_por_prompt import interpretar_prompt, criar_evento
+# Google Calendar
+from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 
-# ======================================================
-# 🔧 CONFIGURAÇÃO INICIAL
-# ======================================================
-load_dotenv()
-logging.basicConfig(level=logging.INFO)
+from agendador_whatsapp import interpretar_mensagem, criar_evento_google_calendar
+
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
 app = Flask(__name__)
 
-# ======================================================
-# 🔐 TWILIO CONFIG
-# ======================================================
-ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
-AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_WHATS_NUMBER = os.getenv("TWILIO_WHATS_NUMBER", "whatsapp:+14155238886")
-ALLOW_LIST = set(filter(None, [n.strip() for n in os.getenv("ALLOW_LIST", "").split(",")]))
-validator = RequestValidator(AUTH_TOKEN) if AUTH_TOKEN else None
+
+# -------------------- GOOGLE AUTH HELPERS --------------------
+
+def _write_google_files_from_env():
+    """
+    Se vierem os JSONs em env vars, persiste como arquivos para a lib do Google usar.
+    """
+    creds_txt = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    token_txt = os.getenv("GOOGLE_TOKEN_JSON")
+
+    if creds_txt and not os.path.exists("credentials.json"):
+        with open("credentials.json", "w", encoding="utf-8") as f:
+            f.write(creds_txt)
+
+    if token_txt and not os.path.exists("token.json"):
+        with open("token.json", "w", encoding="utf-8") as f:
+            f.write(token_txt)
 
 
-# ======================================================
-# 🧾 VALIDAÇÃO DE SEGURANÇA
-# ======================================================
-def _validate_twilio_signature():
-    """Valida a assinatura da Twilio"""
-    if not validator:
-        app.logger.warning("Validator desabilitado (AUTH_TOKEN ausente).")
-        return
-    sig = request.headers.get("X-Twilio-Signature", "")
-    url = request.url
-    params = request.form.to_dict()
-    if not validator.validate(url, params, sig):
-        app.logger.warning("Assinatura Twilio inválida.")
-        abort(403)
+def get_calendar_service():
+    """
+    Cria o 'service' do Calendar v3.
+    Suporta dois caminhos:
+      1) Token/credentials já persistidos (token.json/credentials.json)
+      2) Primeiro uso local -> abre fluxo interativo (apenas ambiente dev)
+    Em produção, prefira setar GOOGLE_CREDENTIALS_JSON e GOOGLE_TOKEN_JSON.
+    """
+    _write_google_files_from_env()
+
+    creds = None
+    if os.path.exists("token.json"):
+        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not os.path.exists("credentials.json"):
+                raise RuntimeError(
+                    "Credenciais ausentes. Defina GOOGLE_CREDENTIALS_JSON/GOOGLE_TOKEN_JSON "
+                    "ou forneça credentials.json/token.json."
+                )
+            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
+            creds = flow.run_local_server(port=0)
+            with open("token.json", "w", encoding="utf-8") as token:
+                token.write(creds.to_json())
+
+    service = build("calendar", "v3", credentials=creds)
+    return service
 
 
-# ======================================================
-# 💬 ENDPOINT PRINCIPAL - WHATSAPP
-# ======================================================
-@app.post("/whats")
+# ------------------------- ROUTES ----------------------------
+
+@app.route("/", methods=["GET"])
+def root():
+    return Response("OK", status=200, mimetype="text/plain")
+
+
+@app.route("/whats", methods=["POST"])
 def whats():
-    """Recebe mensagens, interpreta com IA e agenda no Google Calendar"""
-    _validate_twilio_signature()
+    """
+    Webhook do Twilio WhatsApp.
+    Espera 'Body' com o texto da mensagem.
+    Retorna TwiML com a resposta do agendamento.
+    """
+    body = (request.values.get("Body") or "").strip()
+    sender = request.values.get("From", "")
 
-    body = (request.form.get("Body") or "").strip()
-    from_number = (request.form.get("From") or "").replace("whatsapp:", "")
-    msg_sid = request.form.get("MessageSid")
+    print(f"📥 WhatsApp de {sender}: {body}")
 
-    # ⚙️ Evita duplicação
-    cache_key = os.path.join("/tmp", f"msg_{msg_sid}") if msg_sid else None
-    if cache_key and os.path.exists(cache_key):
+    if not body:
         resp = MessagingResponse()
-        resp.message("⚠️ Mensagem já processada.")
+        resp.message("❌ Mensagem vazia. Envie algo como: 'reunião amanhã às 10h30' ou 'comprar cápsula hoje'.")
         return str(resp)
-    if cache_key:
-        open(cache_key, "w").close()
 
-    app.logger.info("Msg de %s: %s", from_number, body)
+    # Interpreta a frase (parser local)
+    parsed = interpretar_mensagem(body)
+    print("🧠 Interpretado:", json.dumps(parsed, ensure_ascii=False))
 
-    # ⚙️ Autorização opcional
-    if ALLOW_LIST and from_number not in ALLOW_LIST:
+    try:
+        service = get_calendar_service()
+    except Exception as e:
+        print(f"🔴 Erro ao autenticar no Google: {e}")
         resp = MessagingResponse()
-        resp.message("❌ Número não autorizado para usar o agendador.")
+        resp.message("❌ Falha ao conectar no Google Calendar. Verifique as credenciais.")
         return str(resp)
+
+    try:
+        resultado = criar_evento_google_calendar(service, parsed)
+        print("✅ Resultado:", resultado)
+    except Exception as e:
+        print(f"🔴 Erro ao criar evento: {e}")
+        resultado = "❌ Não consegui agendar. Exemplo: 'reunião com João amanhã às 10h30'."
 
     resp = MessagingResponse()
-
-    # 📚 Comando de ajuda
-    if body.lower() in {"help", "ajuda", "menu"}:
-        resp.message(
-            "📅 *Agendador WhatsApp*\n\n"
-            "Envie mensagens como:\n"
-            "• reunião com João amanhã às 14h\n"
-            "• jantar com Maria hoje às 20h\n"
-            "• call com equipe dia 24 às 16h30\n"
-            "• comprar pão amanhã (evento de dia inteiro)\n\n"
-            "O evento será criado automaticamente no Google Calendar ✅"
-        )
-        return str(resp)
-
-    # ==================================================
-    # 🧩 PROCESSAMENTO PRINCIPAL
-    # ==================================================
-    try:
-        parsed = interpretar_prompt(body)
-        data = parsed.get("data")
-        hora = parsed.get("hora")
-
-        # ✅ Agora aceita eventos de dia inteiro (sem hora)
-        if not data:
-            app.logger.error("❌ IA não retornou data válida.")
-            raise ValueError("Interpretação falhou: data ausente.")
-
-        ev = criar_evento(
-            titulo=parsed.get("titulo"),
-            data_inicio=data,
-            hora_inicio=hora,
-            duracao_min=parsed.get("duracao_min", 60),
-            participantes=parsed.get("participantes", []),
-            descricao=parsed.get("descricao", "")
-        )
-
-        evento_url = ev.get("htmlLink", "")
-        hora_txt = hora if hora else "(dia inteiro)"
-
-        resp.message(
-            f"✅ *Evento criado com sucesso!*\n"
-            f"• {parsed.get('titulo')}\n"
-            f"• {data} {hora_txt}\n"
-            f"🔗 {evento_url if evento_url else '(sem link)'}"
-        )
-
-        app.logger.info(f"🎉 Evento criado: {parsed.get('titulo')} em {data} {hora_txt}")
-
-    except Exception as e:
-        app.logger.exception("Erro ao processar mensagem: %s", e)
-        resp.message("❌ Não  consegui agendar. Tente: 'reunião com João amanhã às 10h30'.")
-
+    resp.message(resultado)
     return str(resp)
 
 
-# ======================================================
-# 🩺 HEALTHCHECK
-# ======================================================
-@app.get("/")
-def root():
-    return "OK", 200
-
-
-# ======================================================
-# 🚀 EXECUÇÃO LOCAL (debug)
-# ======================================================
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
+    # Para rodar localmente: python app.py
+    port = int(os.getenv("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=True)
