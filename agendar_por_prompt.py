@@ -1,254 +1,249 @@
-import os
+# -*- coding: utf-8 -*-
+"""
+agendador_whatsapp.py
+Camada de domínio: interpretar mensagem em PT-BR e criar evento no Google Calendar.
+
+Regras implementadas:
+- “hoje”, “amanhã/amanha”, “depois de amanhã/amanha”
+- “fim do mês” (mês corrente)
+- “semana que vem” (+7 dias)
+- data explícita “24 de outubro de 2025” (ou “24 de outubro” => ano corrente)
+- “na próxima <dia da semana>” (se hoje for o dia, vai para a semana seguinte)
+- extrai horários “10h30”, “10:30”, “16h”, etc.
+- sem hora => evento de dia inteiro
+- com hora => 60 min + Meet
+- “convide amor” -> adiciona automaticamente britto.marilia@gmail.com
+"""
+
 import re
-import json
+import uuid
 import pytz
-import httpx
-import calendar
-from datetime import datetime, timedelta
-from googleapiclient.discovery import build
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
+from calendar import monthrange
+from datetime import datetime, timedelta, date, time as dtime
 
-# ======================================================
-# 🔧 CONFIGURAÇÕES GERAIS
-# ======================================================
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
-TZ = "America/Sao_Paulo"
+# -------------------- CONFIG --------------------
+TZ = pytz.timezone("America/Sao_Paulo")
+DUR_PADRAO_MIN = 60
+CONVIDADO_AMOR = "britto.marilia@gmail.com"
+# ------------------------------------------------
 
+MESES = {
+    "janeiro": 1, "fevereiro": 2, "marco": 3, "março": 3,
+    "abril": 4, "maio": 5, "junho": 6, "julho": 7, "agosto": 8,
+    "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12
+}
 
-# ======================================================
-# 🔐 GOOGLE CREDENTIALS
-# ======================================================
-def _write_google_files_from_env():
-    """Cria arquivos de credenciais a partir das variáveis do ambiente (Render)"""
-    creds_txt = os.getenv("GOOGLE_CREDENTIALS_JSON")
-    token_txt = os.getenv("GOOGLE_TOKEN_JSON")
-
-    if creds_txt and not os.path.exists("credentials.json"):
-        with open("credentials.json", "w", encoding="utf-8") as f:
-            f.write(creds_txt)
-
-    if token_txt and not os.path.exists("token.json"):
-        with open("token.json", "w", encoding="utf-8") as f:
-            f.write(token_txt)
+DIAS = {
+    "segunda": 0, "segunda-feira": 0,
+    "terca": 1, "terça": 1, "terca-feira": 1, "terça-feira": 1,
+    "quarta": 2, "quarta-feira": 2,
+    "quinta": 3, "quinta-feira": 3,
+    "sexta": 4, "sexta-feira": 4,
+    "sabado": 5, "sábado": 5,
+    "domingo": 6
+}
 
 
-def get_calendar_service():
-    """Autentica e retorna o serviço do Google Calendar"""
-    _write_google_files_from_env()
-    creds = None
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-            creds = flow.run_console()
-        with open("token.json", "w", encoding="utf-8") as f:
-            f.write(creds.to_json())
-
-    return build("calendar", "v3", credentials=creds)
+def _agora():
+    return datetime.now(TZ)
 
 
-# ======================================================
-# 🧩 INTERPRETAÇÃO DE DATAS SIMPLES (fallback local)
-# ======================================================
-def interpretar_data_local(prompt: str) -> str | None:
-    """Tenta identificar datas simples no texto, como:
-    - 'fim do mês'
-    - 'amanhã'
-    - 'dia 25'
-    - 'dia 25 de outubro de 2025'
-    Retorna uma string no formato YYYY-MM-DD
+def _norm(txt: str) -> str:
+    txt = txt.lower().strip()
+    txt = re.sub(r"\s+", " ", txt)
+    return txt
+
+
+def extrai_hora(msg: str):
     """
-    tz = pytz.timezone(TZ)
-    hoje = datetime.now(tz)
-    texto = prompt.lower().strip()
-
-    # "amanhã"
-    if "amanhã" in texto or "amanha" in texto:
-        return (hoje + timedelta(days=1)).strftime("%Y-%m-%d")
-
-    # "depois de amanhã"
-    if "depois de amanhã" in texto:
-        return (hoje + timedelta(days=2)).strftime("%Y-%m-%d")
-
-    # "fim do mês" ou "último dia do mês"
-    if "fim do mês" in texto or "último dia do mês" in texto:
-        ultimo_dia = calendar.monthrange(hoje.year, hoje.month)[1]
-        return hoje.replace(day=ultimo_dia).strftime("%Y-%m-%d")
-
-    # "dia 25"
-    m_dia = re.search(r"dia\s*(\d{1,2})", texto)
-    if m_dia:
-        dia = int(m_dia.group(1))
-        # detecta mês opcional
-        meses = {
-            "janeiro": 1, "fevereiro": 2, "março": 3, "abril": 4, "maio": 5, "junho": 6,
-            "julho": 7, "agosto": 8, "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12
-        }
-        m_mes = re.search(r"de\s*(janeiro|fevereiro|março|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)", texto)
-        mes = meses[m_mes.group(1)] if m_mes else hoje.month
-        m_ano = re.search(r"(\d{4})", texto)
-        ano = int(m_ano.group(1)) if m_ano else hoje.year
-        try:
-            return datetime(ano, mes, dia).strftime("%Y-%m-%d")
-        except ValueError:
-            pass
-
+    Retorna um dtime (timezone-aware) ou None.
+    Suporta: 10h, 10h30, 10:30, 9, 09:00
+    """
+    m = re.search(r"\b(\d{1,2})h(?:(\d{2}))\b", _norm(msg))
+    if m:
+        hh = int(m.group(1))
+        mm = int(m.group(2))
+        if 0 <= hh < 24 and 0 <= mm < 60:
+            return dtime(hh, mm, tzinfo=TZ)
+    m = re.search(r"\b(\d{1,2})h\b", _norm(msg))
+    if m:
+        hh = int(m.group(1))
+        if 0 <= hh < 24:
+            return dtime(hh, 0, tzinfo=TZ)
+    m = re.search(r"\b(\d{1,2})(?::(\d{2}))\b", _norm(msg))
+    if m:
+        hh = int(m.group(1))
+        mm = int(m.group(2))
+        if 0 <= hh < 24 and 0 <= mm < 60:
+            return dtime(hh, mm, tzinfo=TZ)
+    # número isolado (ex.: "9")
+    m = re.search(r"\b(\d{1,2})\b", _norm(msg))
+    if m:
+        hh = int(m.group(1))
+        if 0 <= hh < 24:
+            return dtime(hh, 0, tzinfo=TZ)
     return None
 
 
-# ======================================================
-# 🧠 INTERPRETAÇÃO DE TEXTO (IA OpenAI + fallback local)
-# ======================================================
-def interpretar_prompt(prompt: str):
+def _normaliza_chave(txt: str) -> str:
+    rep = str.maketrans({
+        "á": "a", "ã": "a", "â": "a", "à": "a",
+        "é": "e", "ê": "e",
+        "í": "i",
+        "ó": "o", "ô": "o",
+        "ú": "u",
+        "ç": "c"
+    })
+    return txt.translate(rep)
+
+
+def extrai_data(msg: str, agora: datetime):
     """
-    Usa GPT-4o-mini para interpretar frases e retornar:
-    titulo, data, hora, duracao_min, participantes, descricao
+    Retorna (date, origem_str) ou (None, None)
+    A ordem das verificações evita conflitos (ex.: "depois de amanhã" antes de "amanhã")
     """
-    tz = pytz.timezone(TZ)
-    hoje = datetime.now(tz).date()
-    data_local = interpretar_data_local(prompt)
+    raw = _norm(msg)
 
-    try:
-        token = os.getenv("OPENAI_TOKEN", "").strip()
-        if not token:
-            raise ValueError("OPENAI_TOKEN ausente no ambiente.")
-        print(f"✅ Token OpenAI ativo (prefixo): {token[:10]}...")
+    # 1) Depois de amanhã
+    if re.search(r"\bdepois de amanh?ã?\b", raw):
+        return (agora + timedelta(days=2)).date(), "depois_amanha"
 
-        exemplos = [
-            {"input": "reunião com João amanhã às 10h30",
-             "output": {"titulo": "Reunião com João", "data": "amanhã", "hora": "10:30"}},
-            {"input": "dentista dia 25 de outubro de 2025",
-             "output": {"titulo": "Dentista", "data": "2025-10-25", "hora": ""}},
-            {"input": "reunião fim do mês",
-             "output": {"titulo": "Reunião", "data": "fim do mês", "hora": ""}},
-            {"input": "❤️⏳🏠 às 21h25 convidar britto.marilia@gmail.com",
-             "output": {"titulo": "❤️⏳🏠", "data": "hoje", "hora": "21:25", "participantes": ["britto.marilia@gmail.com"]}}
-        ]
+    # 2) Amanhã
+    if re.search(r"\bamanh?ã?\b", raw):
+        return (agora + timedelta(days=1)).date(), "amanha"
 
-        prompt_base = (
-            "Você é um assistente que interpreta frases de agendamento em português e responde **somente** em JSON válido.\n"
-            "Identifique:\n"
-            "• Título\n"
-            "• Data (AAAA-MM-DD ou 'hoje'/'amanhã')\n"
-            "• Hora inicial ('HH:MM')\n"
-            "• Duração (em minutos)\n"
-            "• Participantes (e-mails citados)\n"
-            "• Descrição (detalhes extras)\n\n"
-            "Formato JSON:\n"
-            "{ 'titulo': 'texto', 'data': 'AAAA-MM-DD', 'hora': 'HH:MM', 'duracao_min': número, 'participantes': [], 'descricao': '' }\n\n"
-            f"Exemplos:\n{json.dumps(exemplos, ensure_ascii=False, indent=2)}\n\n"
-            f"Agora processe esta frase:\n'{prompt}'"
-        )
+    # 3) Hoje
+    if re.search(r"\bhoje\b", raw):
+        return agora.date(), "hoje"
 
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    # 4) Semana que vem (+7)
+    if re.search(r"\bsemana que vem\b", raw):
+        return (agora + timedelta(days=7)).date(), "semana_que_vem"
+
+    # 5) Fim do mês corrente
+    if re.search(r"\bfim do m[eê]s\b", raw):
+        y, m = agora.year, agora.month
+        last_day = monthrange(y, m)[1]
+        return date(y, m, last_day), "fim_do_mes"
+
+    # 6) Próxima <dia da semana>
+    m = re.search(r"\b(?:na|na\s+)?pr[oó]xima\s+(segunda|ter[cç]a|terça|quarta|quinta|sexta|s[áa]bado|sabado|domingo)\b", raw)
+    if m:
+        alvo_txt = _normaliza_chave(m.group(1))
+        # normaliza chaves
+        if alvo_txt == "terca": alvo_txt = "terca"
+        if alvo_txt == "sabado": alvo_txt = "sabado"
+        alvo = DIAS.get(alvo_txt, None)
+        if alvo is not None:
+            hoje_dw = agora.weekday()
+            delta = (alvo - hoje_dw) % 7
+            if delta == 0:
+                delta = 7
+            return (agora + timedelta(days=delta)).date(), "proxima_dia_semana"
+
+    # 7) Datas explícitas “24 de outubro de 2025” ou “24 de outubro”
+    m = re.search(r"\b(\d{1,2})\s+de\s+([a-záãéêíóôúç]+)(?:\s+de\s+(\d{4}))?\b", raw)
+    if m:
+        dd = int(m.group(1))
+        mes_txt = _normaliza_chave(m.group(2))
+        mm = MESES.get(mes_txt)
+        if mm:
+            yyyy = int(m.group(3)) if m.group(3) else agora.year
+            try:
+                return date(yyyy, mm, dd), "data_explicita"
+            except ValueError:
+                pass
+
+    return None, None
+
+
+def precisa_convidar_amor(msg: str) -> bool:
+    return "convide amor" in _norm(msg)
+
+
+def interpretar_mensagem(msg: str):
+    """
+    Produz um dicionário padronizado para o agendamento.
+    """
+    agora = _agora()
+    titulo = msg.strip()
+    data_dt, origem = extrai_data(msg, agora)
+    hora_dt = extrai_hora(msg)
+
+    participantes = []
+    if precisa_convidar_amor(msg):
+        participantes.append(CONVIDADO_AMOR)
+
+    return {
+        "titulo": titulo,
+        "data": data_dt.isoformat() if data_dt else "",
+        "hora": hora_dt.strftime("%H:%M") if hora_dt else "",
+        "duracao_min": DUR_PADRAO_MIN if hora_dt else 0,
+        "participantes": participantes,
+        "descricao": "",
+        "meta": {"origem_data": origem}
+    }
+
+
+# ----------------- GOOGLE CALENDAR -----------------
+
+def criar_evento_google_calendar(service, parsed: dict):
+    """
+    service: googleapiclient Calendar v3
+    parsed: retorno de interpretar_mensagem()
+
+    - Sem hora => all-day
+    - Com hora => DUR_PADRAO_MIN + Meet
+    - “convide amor” => adiciona CONVIDADO_AMOR
+    """
+    titulo = parsed["titulo"]
+    participantes = parsed.get("participantes", [])
+
+    if not parsed["data"]:
+        return "❌ Não consegui entender a data. Exemplos: 'amanhã às 10h30', 'fim do mês', 'na próxima quinta'."
+
+    # All-day
+    if not parsed["hora"]:
+        dia = datetime.fromisoformat(parsed["data"]).date()
         body = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {"role": "system", "content": "Responda apenas com JSON puro e válido."},
-                {"role": "user", "content": prompt_base},
-            ],
-            "temperature": 0.1,
+            "summary": titulo,
+            "start": {"date": dia.isoformat()},
+            "end": {"date": (dia + timedelta(days=1)).isoformat()},
         }
+        if participantes:
+            body["attendees"] = [{"email": e} for e in participantes]
 
-        print(f"🧠 Interpretando prompt → {prompt}")
-        response = httpx.post("https://api.openai.com/v1/chat/completions", headers=headers, json=body, timeout=30)
-        data = response.json()
-        conteudo = data["choices"][0]["message"]["content"].strip()
+        service.events().insert(calendarId="primary", body=body).execute()
+        return f"✅ Evento de dia inteiro criado em {dia.strftime('%d/%m/%Y')}: {titulo}"
 
-        if conteudo.startswith("```"):
-            conteudo = conteudo.replace("```json", "").replace("```", "").strip()
-
-        parsed = json.loads(conteudo)
-
-        # Ajusta “hoje” / “amanhã”
-        if parsed.get("data") == "hoje":
-            parsed["data"] = hoje.strftime("%Y-%m-%d")
-        elif parsed.get("data") in ("amanha", "amanhã"):
-            parsed["data"] = (hoje + timedelta(days=1)).strftime("%Y-%m-%d")
-        elif parsed.get("data") in ("fim do mês", "último dia do mês"):
-            ultimo_dia = calendar.monthrange(hoje.year, hoje.month)[1]
-            parsed["data"] = datetime(hoje.year, hoje.month, ultimo_dia).strftime("%Y-%m-%d")
-
-        # Se IA não entendeu, usa fallback local
-        if not parsed.get("data") and data_local:
-            parsed["data"] = data_local
-
-        # Reconhece apelidos de convidados
-        if "participantes" in parsed:
-            convites = []
-            for p in parsed["participantes"]:
-                if p.lower() in ("amor", "marilia"):
-                    convites.append("britto.marilia@gmail.com")
-                elif "@" in p:
-                    convites.append(p)
-            parsed["participantes"] = convites
-
-        print("🧩 Resultado final da IA:")
-        print(json.dumps(parsed, indent=2, ensure_ascii=False))
-        return parsed
-
-    except Exception as e:
-        print(f"⚠️ Falha ao interpretar via OpenAI: {e}")
-        # Fallback simples
-        return {
-            "titulo": prompt.title(),
-            "data": data_local or hoje.strftime("%Y-%m-%d"),
-            "hora": "",
-            "duracao_min": 60,
-            "participantes": [],
-            "descricao": "",
-        }
-
-
-# ======================================================
-# 📆 CRIAÇÃO DO EVENTO NO GOOGLE CALENDAR
-# ======================================================
-def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, descricao):
-    """Cria evento no Google Calendar"""
-    fuso = pytz.timezone(TZ)
-    hoje = datetime.now(fuso).date()
-
-    # Corrige “hoje” / “amanhã”
-    if isinstance(data_inicio, str):
-        if data_inicio.lower() == "hoje":
-            data_inicio = hoje.strftime("%Y-%m-%d")
-        elif data_inicio.lower() in ("amanha", "amanhã"):
-            data_inicio = (hoje + timedelta(days=1)).strftime("%Y-%m-%d")
-
-    service = get_calendar_service()
-
-    if not hora_inicio:
-        data_fim = (datetime.strptime(data_inicio, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-        body = {
-            "summary": titulo or "Evento",
-            "description": descricao or "",
-            "start": {"date": data_inicio},
-            "end": {"date": data_fim},
-            "attendees": [{"email": e} for e in (participantes or []) if "@" in e],
-            "reminders": {"useDefault": False},
-        }
-        ev = service.events().insert(calendarId="primary", body=body).execute()
-        print(f"✅ Evento de dia inteiro criado: {ev.get('htmlLink')}")
-        return ev
-
-    # Evento com hora
-    inicio = fuso.localize(datetime.strptime(f"{data_inicio} {hora_inicio}", "%Y-%m-%d %H:%M"))
-    fim = inicio + timedelta(minutes=int(duracao_min or 60))
+    # Timed + Meet
+    dia = datetime.fromisoformat(parsed["data"]).date()
+    hh, mm = map(int, parsed["hora"].split(":"))
+    inicio = TZ.localize(datetime.combine(dia, dtime(hh, mm)))
+    fim = inicio + timedelta(minutes=parsed["duracao_min"] or DUR_PADRAO_MIN)
 
     body = {
-        "summary": titulo or "Evento",
-        "description": descricao or "",
-        "start": {"dateTime": inicio.isoformat(), "timeZone": TZ},
-        "end": {"dateTime": fim.isoformat(), "timeZone": TZ},
-        "attendees": [{"email": e} for e in (participantes or []) if "@" in e],
-        "reminders": {"useDefault": True},
+        "summary": titulo,
+        "start": {"dateTime": inicio.isoformat()},
+        "end": {"dateTime": fim.isoformat()},
+        "conferenceData": {
+            "createRequest": {
+                "requestId": str(uuid.uuid4()),
+                "conferenceSolutionKey": {"type": "hangoutsMeet"}
+            }
+        }
     }
-    ev = service.events().insert(calendarId="primary", body=body).execute()
-    print(f"✅ Evento com hora criado: {ev.get('htmlLink')}")
-    return ev
+    if participantes:
+        body["attendees"] = [{"email": e} for e in participantes]
+
+    created = service.events().insert(
+        calendarId="primary",
+        body=body,
+        conferenceDataVersion=1
+    ).execute()
+
+    # Se quiser devolver o link do meet:
+    meet = created.get("hangoutLink")
+    if meet:
+        return f"✅ Evento criado para {inicio.strftime('%d/%m/%Y %H:%M')} (Meet): {titulo}\n🔗 {meet}"
+    return f"✅ Evento criado para {inicio.strftime('%d/%m/%Y %H:%M')} (Meet adicionado): {titulo}"
