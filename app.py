@@ -21,7 +21,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 
-from agendador_whatsapp import interpretar_mensagem, criar_evento_google_calendar
+from agendar_por_prompt import interpretar_prompt as interpretar_mensagem, criar_evento as criar_evento_google_calendar
+
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
