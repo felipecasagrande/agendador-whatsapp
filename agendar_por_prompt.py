@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 agendar_por_prompt.py
-Camada de domínio: interpretar mensagem em PT-BR e criar eventos no Google Calendar
+Camada de domínio: interpretar mensagem em PT-BR e criar eventos no Google Calendar.
 """
 
 import os
@@ -10,9 +10,7 @@ import pytz
 import httpx
 from datetime import datetime, timedelta
 from googleapiclient.discovery import build
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 
 # ======================================================
 # 🔧 CONFIGURAÇÕES GERAIS
@@ -22,47 +20,13 @@ TZ = "America/Sao_Paulo"
 
 
 # ======================================================
-# 🔐 GOOGLE CREDENTIALS
-# ======================================================
-def _write_google_files_from_env():
-    """Cria os arquivos de credenciais a partir das variáveis do Render"""
-    creds_txt = os.getenv("GOOGLE_CREDENTIALS_JSON")
-    token_txt = os.getenv("GOOGLE_TOKEN_JSON")
-
-    if creds_txt and not os.path.exists("credentials.json"):
-        with open("credentials.json", "w", encoding="utf-8") as f:
-            f.write(creds_txt)
-
-    if token_txt and not os.path.exists("token.json"):
-        with open("token.json", "w", encoding="utf-8") as f:
-            f.write(token_txt)
-
-
-def get_calendar_service():
-    """Autentica e retorna o serviço do Google Calendar"""
-    _write_google_files_from_env()
-    creds = None
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-            creds = flow.run_console()
-        with open("token.json", "w", encoding="utf-8") as f:
-            f.write(creds.to_json())
-
-    return build("calendar", "v3", credentials=creds)
-
-
-# ======================================================
 # 🧠 INTERPRETAÇÃO DE TEXTO (IA OpenAI)
 # ======================================================
 def interpretar_prompt(prompt: str):
-    """Usa GPT-4o-mini para interpretar frases e retornar:
-       titulo, data, hora, duracao_min, participantes, descricao, colorId"""
+    """
+    Usa GPT-4o-mini para interpretar frases e retornar:
+    titulo, data, hora, duracao_min, participantes, descricao, colorId
+    """
     tz = pytz.timezone(TZ)
     hoje = datetime.now(tz).date()
 
@@ -82,15 +46,8 @@ def interpretar_prompt(prompt: str):
         ]
 
         prompt_base = (
-            "Você é um assistente que interpreta frases de agendamento em português e responde **somente** em JSON válido.\n"
-            "Identifique:\n"
-            "• Título (texto principal)\n"
-            "• Data (AAAA-MM-DD ou 'hoje'/'amanhã')\n"
-            "• Hora inicial ('HH:MM')\n"
-            "• Duração (em minutos)\n"
-            "• Participantes (e-mails citados)\n"
-            "• Descrição (detalhes extras)\n"
-            "• Cor (colorId de 1 a 11)\n\n"
+            "Você é um assistente que interpreta frases de agendamento em português e responde SOMENTE em JSON válido.\n"
+            "Identifique: título, data (AAAA-MM-DD ou 'hoje'/'amanhã'), hora ('HH:MM'), duração (em minutos), participantes, descrição e colorId.\n\n"
             "Formato JSON:\n"
             "{\n"
             '  "titulo": "texto",\n'
@@ -141,10 +98,30 @@ def interpretar_prompt(prompt: str):
 
 
 # ======================================================
-# 📆 CRIAÇÃO DO EVENTO NO GOOGLE CALENDAR (com cor)
+# 🔐 GOOGLE CALENDAR SERVICE ACCOUNT
 # ======================================================
-def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, descricao, colorId="1"):
-    """Cria evento no Google Calendar com suporte a cores."""
+def get_calendar_service():
+    """Autentica via Service Account (sem token.json)"""
+    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    if not creds_json:
+        raise ValueError("❌ GOOGLE_CREDENTIALS_JSON ausente no ambiente.")
+
+    # Corrige o formato do JSON
+    creds_json = creds_json.replace("\\n", "\n")
+
+    creds = service_account.Credentials.from_service_account_info(
+        json.loads(creds_json),
+        scopes=SCOPES
+    )
+    return build("calendar", "v3", credentials=creds)
+
+
+# ======================================================
+# 📅 CRIAÇÃO DE EVENTO
+# ======================================================
+def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, descricao, colorId="9"):
+    """Cria evento no Google Calendar"""
+    service = get_calendar_service()
     fuso = pytz.timezone(TZ)
     hoje = datetime.now(fuso).date()
 
@@ -155,8 +132,6 @@ def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, d
         elif data_inicio.lower() in ("amanha", "amanhã"):
             data_inicio = (hoje + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    service = get_calendar_service()
-
     # Evento de dia inteiro
     if not hora_inicio or str(hora_inicio).strip() == "":
         data_fim = (datetime.strptime(data_inicio, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -166,14 +141,14 @@ def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, d
             "start": {"date": data_inicio},
             "end": {"date": data_fim},
             "attendees": [{"email": e} for e in (participantes or []) if "@" in e],
-            "colorId": colorId or "1",
+            "colorId": colorId,
             "reminders": {"useDefault": False},
         }
         ev = service.events().insert(calendarId="primary", body=body).execute()
-        print(f"✅ Evento (dia inteiro, cor {colorId}): {ev.get('htmlLink')}")
+        print(f"✅ Evento de dia inteiro criado: {ev.get('htmlLink')}")
         return ev
 
-    # Evento com hora e duração
+    # Evento com hora
     inicio = fuso.localize(datetime.strptime(f"{data_inicio} {hora_inicio}", "%Y-%m-%d %H:%M"))
     fim = inicio + timedelta(minutes=int(duracao_min or 60))
     body = {
@@ -182,9 +157,9 @@ def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, d
         "start": {"dateTime": inicio.isoformat(), "timeZone": TZ},
         "end": {"dateTime": fim.isoformat(), "timeZone": TZ},
         "attendees": [{"email": e} for e in (participantes or []) if "@" in e],
-        "colorId": colorId or "1",
+        "colorId": colorId,
         "reminders": {"useDefault": True},
     }
     ev = service.events().insert(calendarId="primary", body=body).execute()
-    print(f"✅ Evento com hora criado (cor {colorId}): {ev.get('htmlLink')}")
+    print(f"✅ Evento com hora criado: {ev.get('htmlLink')}")
     return ev
