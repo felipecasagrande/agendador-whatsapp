@@ -6,6 +6,7 @@ Camada de domínio: interpretar mensagem em PT-BR e criar eventos no Google Cale
 
 import os
 import json
+import re
 import pytz
 import httpx
 from datetime import datetime, timedelta
@@ -98,19 +99,20 @@ def interpretar_prompt(prompt: str):
 
 
 # ======================================================
-# 🔐 GOOGLE CALENDAR SERVICE ACCOUNT
+# 🔐 GOOGLE CALENDAR SERVICE ACCOUNT (com correção Render)
 # ======================================================
 def get_calendar_service():
-    """Autentica via Service Account (sem token.json)"""
+    """Autentica via Service Account (sem token.json), corrigindo escapes do Render"""
     creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
     if not creds_json:
         raise ValueError("❌ GOOGLE_CREDENTIALS_JSON ausente no ambiente.")
 
-    # Corrige o formato do JSON
-    creds_json = creds_json.replace("\\n", "\n")
+    # ✅ Corrige quebras e escapes incorretos vindos do painel do Render
+    cleaned = re.sub(r'(?<!\\)\\(?![\\n"])', r"\\\\", creds_json)
+    cleaned = cleaned.replace("\\n", "\n")
 
     creds = service_account.Credentials.from_service_account_info(
-        json.loads(creds_json),
+        json.loads(cleaned),
         scopes=SCOPES
     )
     return build("calendar", "v3", credentials=creds)
@@ -148,7 +150,7 @@ def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, d
         print(f"✅ Evento de dia inteiro criado: {ev.get('htmlLink')}")
         return ev
 
-    # Evento com hora
+    # Evento com hora definida
     inicio = fuso.localize(datetime.strptime(f"{data_inicio} {hora_inicio}", "%Y-%m-%d %H:%M"))
     fim = inicio + timedelta(minutes=int(duracao_min or 60))
     body = {
