@@ -101,21 +101,42 @@ def interpretar_prompt(prompt: str):
 # ======================================================
 # 🔐 GOOGLE CALENDAR SERVICE ACCOUNT (com correção Render)
 # ======================================================
+# ======================================================
+# 🔐 GOOGLE CALENDAR SERVICE ACCOUNT (versão blindada)
+# ======================================================
 def get_calendar_service():
-    """Autentica via Service Account (sem token.json), corrigindo escapes do Render"""
+    """Autentica via Service Account, corrigindo qualquer variação de formato no Render"""
     creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
     if not creds_json:
         raise ValueError("❌ GOOGLE_CREDENTIALS_JSON ausente no ambiente.")
 
-    # ✅ Corrige quebras e escapes incorretos vindos do painel do Render
-    cleaned = re.sub(r'(?<!\\)\\(?![\\n"])', r"\\\\", creds_json)
-    cleaned = cleaned.replace("\\n", "\n")
+    # 🔍 Limpeza inteligente: normaliza todas as barras e quebras
+    cleaned = creds_json.strip()
 
-    creds = service_account.Credentials.from_service_account_info(
-        json.loads(cleaned),
-        scopes=SCOPES
-    )
+    # Se vier com \\n duplas, transforma em \n reais
+    if "\\n" in cleaned and not cleaned.count("\\\\n"):
+        cleaned = cleaned.replace("\\n", "\n")
+
+    # Se vier com escapes simples inválidos (\s, \t, etc), reforça todas as barras
+    import re
+    cleaned = re.sub(r'(?<!\\)\\(?![n"\\/bfnrtu])', r"\\\\", cleaned)
+
+    # Se o Render colou o JSON inline (sem aspas corretas), corrige delimitadores
+    if not cleaned.startswith("{"):
+        raise ValueError("❌ O conteúdo de GOOGLE_CREDENTIALS_JSON não é um JSON válido.")
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        print("⚠️ JSON inválido após limpeza. Salvando trecho para depuração.")
+        with open("debug_creds.txt", "w", encoding="utf-8") as f:
+            f.write(cleaned[:500])
+        raise ValueError(f"Erro ao decodificar GOOGLE_CREDENTIALS_JSON: {e}")
+
+    creds = service_account.Credentials.from_service_account_info(data, scopes=SCOPES)
+    print(f"✅ Credenciais carregadas: {data.get('client_email')}")
     return build("calendar", "v3", credentials=creds)
+
 
 
 # ======================================================
