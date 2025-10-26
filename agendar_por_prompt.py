@@ -49,7 +49,8 @@ def interpretar_prompt(prompt: str):
         # Lista de palavras que indicam comandos simples de agendamento
         palavras_chave = ['corte', 'cabelo', 'reunião', 'consulta', 'compra', 'comprar', 
                          'fazer', 'ir', 'visita', 'encontro', 'evento', 'tarefa', 'tomar',
-                         'psi', 'psicólogo', 'psicologa', 'médico', 'médica', 'dentista']
+                         'psi', 'psicólogo', 'psicologa', 'médico', 'médica', 'dentista',
+                         'manipular', 'melatonina']
         
         # Se for um comando muito simples (1-3 palavras) contendo palavras-chave
         palavras = prompt_limpo.split()
@@ -83,6 +84,8 @@ def interpretar_prompt(prompt: str):
              "output": {"titulo": "Consulta médica", "data": "hoje", "hora": "", "duracao_min": 60}},
             {"input": "tomar psi",
              "output": {"titulo": "Sessão de psicologia", "data": "hoje", "hora": "", "duracao_min": 60}},
+            {"input": "manipular melatonina",
+             "output": {"titulo": "Manipular melatonina", "data": "hoje", "hora": "", "duracao_min": 60}},
         ]
 
         prompt_base = (
