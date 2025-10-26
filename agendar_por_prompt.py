@@ -32,6 +32,27 @@ def interpretar_prompt(prompt: str):
     hoje = datetime.now(tz).date()
 
     try:
+        # 🔍 DETECÇÃO DE COMANDOS SIMPLES (como "Corte cabelo")
+        prompt_limpo = prompt.strip().lower()
+        
+        # Lista de palavras que indicam comandos simples de agendamento
+        palavras_chave = ['corte', 'cabelo', 'reunião', 'consulta', 'compra', 'comprar', 
+                         'fazer', 'ir', 'visita', 'encontro', 'evento', 'tarefa']
+        
+        # Se for um comando muito simples (1-3 palavras) contendo palavras-chave
+        palavras = prompt_limpo.split()
+        if 1 <= len(palavras) <= 3 and any(palavra in prompt_limpo for palavra in palavras_chave):
+            print(f"🎯 Detectado comando simples: '{prompt}' - Agendando para hoje")
+            return {
+                "titulo": prompt.strip(),
+                "data": hoje.strftime("%Y-%m-%d"),
+                "hora": "",
+                "duracao_min": 60,
+                "participantes": [],
+                "descricao": "Agendamento automático para hoje",
+                "colorId": "9"
+            }
+
         token = os.getenv("OPENAI_TOKEN", "").strip()
         if not token:
             raise ValueError("OPENAI_TOKEN ausente no ambiente.")
@@ -44,11 +65,16 @@ def interpretar_prompt(prompt: str):
              "output": {"titulo": "Jantar com Maria", "data": "hoje", "hora": "20:00"}},
             {"input": "comprar suco dia 23/10/2025",
              "output": {"titulo": "Comprar suco", "data": "2025-10-23", "hora": ""}},
+            {"input": "corte de cabelo",
+             "output": {"titulo": "Corte de cabelo", "data": "hoje", "hora": "", "duracao_min": 60}},
+            {"input": "consulta médica",
+             "output": {"titulo": "Consulta médica", "data": "hoje", "hora": "", "duracao_min": 60}},
         ]
 
         prompt_base = (
             "Você é um assistente que interpreta frases de agendamento em português e responde SOMENTE em JSON válido.\n"
             "Identifique: título, data (AAAA-MM-DD ou 'hoje'/'amanhã'), hora ('HH:MM'), duração (em minutos), participantes, descrição e colorId.\n\n"
+            "IMPORTANTE: Para frases simples como 'corte cabelo', 'consulta médica', 'reunião', agende automaticamente para HOJE como evento de dia inteiro.\n\n"
             "Formato JSON:\n"
             "{\n"
             '  "titulo": "texto",\n'
@@ -67,7 +93,7 @@ def interpretar_prompt(prompt: str):
         body = {
             "model": "gpt-4o-mini",
             "messages": [
-                {"role": "system", "content": "Responda apenas com JSON puro e válido, sem comentários."},
+                {"role": "system", "content": "Responda apenas com JSON puro e válido, sem comentários. Para tarefas simples sem data, use 'hoje'."},
                 {"role": "user", "content": prompt_base},
             ],
             "temperature": 0.1,
@@ -95,7 +121,17 @@ def interpretar_prompt(prompt: str):
 
     except Exception as e:
         print(f"❌ Erro ao interpretar prompt: {e}")
-        raise
+        # Fallback: se der erro na IA, cria evento para hoje
+        print(f"🔄 Fallback: criando evento para hoje com título '{prompt}'")
+        return {
+            "titulo": prompt.strip(),
+            "data": hoje.strftime("%Y-%m-%d"),
+            "hora": "",
+            "duracao_min": 60,
+            "participantes": [],
+            "descricao": "Agendamento automático",
+            "colorId": "9"
+        }
 
 
 # ======================================================
