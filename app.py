@@ -1,110 +1,160 @@
 # -*- coding: utf-8 -*-
 """
 app.py
-Flask + Twilio WhatsApp + Google Calendar (Service Account)
-Versão 2025 — compatível com Render
+Flask + WhatsApp Cloud API (Meta) + Google Calendar (Service Account)
+
+Rotas:
+- GET /webhook   -> verificação do webhook (Meta)
+- POST /webhook  -> recebe mensagens e responde
+- GET /          -> healthcheck
+
+Env vars necessárias (Render):
+- META_VERIFY_TOKEN
+- META_ACCESS_TOKEN
+- PHONE_NUMBER_ID
+- CALENDAR_ID                       (seu calendário alvo, ex: felipecasagrandematos@gmail.com)
+- GOOGLE_CREDENTIALS_JSON           (conteúdo JSON da service account)
+- TZ                                (opcional, default America/Sao_Paulo)
 """
 
 import os
 import json
-from flask import Flask, request, Response
-from twilio.twiml.messaging_response import MessagingResponse
+import requests
+from flask import Flask, request, jsonify, Response
 
-# Google Calendar
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 
-# Import local
-from agendador_whatsapp import interpretar_mensagem, criar_evento_google_calendar
+from agendador_whatsapp import interpretar_mensagem, criar_evento_google_calendar, build_tz
 
-# ==============================
-# ⚙️ CONFIGURAÇÃO DO FLASK
-# ==============================
 app = Flask(__name__)
 
-# ==============================
-# 🔑 GOOGLE CALENDAR AUTH
-# ==============================
+# ------------- Config Meta (WhatsApp Cloud API) -------------
+META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "troque-este-token")
+META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN", "")
+PHONE_NUMBER_ID   = os.getenv("PHONE_NUMBER_ID", "")  # ex: "123456789012345"
+
+# ------------- Config Google Calendar -----------------------
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
+CALENDAR_ID = os.getenv("CALENDAR_ID", "")             # e-mail do calendário alvo
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
 
-def carregar_credenciais():
-    """
-    Lê as credenciais do Google de variável de ambiente (Render)
-    ou do arquivo local credentials.json.
-    """
-    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-    if creds_json:
-        creds_dict = json.loads(creds_json)
-        creds = service_account.Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    elif os.path.exists("credentials.json"):
-        creds = service_account.Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
-    else:
-        raise FileNotFoundError("⚠️ Nenhum credentials.json encontrado nem GOOGLE_CREDENTIALS_JSON definido.")
-    return creds
+# ------------- Timezone -------------------------------------
+TZ = build_tz(os.getenv("TZ", "America/Sao_Paulo"))
 
-# Inicializa o serviço do Calendar
-try:
-    CREDS = carregar_credenciais()
-    service = build("calendar", "v3", credentials=CREDS)
+# ------------- Calendar Service (lazy) ----------------------
+_calendar_service = None
+def get_calendar_service():
+    global _calendar_service
+    if _calendar_service:
+        return _calendar_service
+    if not GOOGLE_CREDENTIALS_JSON:
+        raise RuntimeError("GOOGLE_CREDENTIALS_JSON não definido.")
+    info = json.loads(GOOGLE_CREDENTIALS_JSON)
+    creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+    _calendar_service = build("calendar", "v3", credentials=creds)
     print("✅ Google Calendar autenticado com sucesso.")
-except Exception as e:
-    service = None
-    print(f"🔴 Falha ao autenticar Google Calendar: {e}")
+    return _calendar_service
 
-# ==============================
-# 🌐 HEALTHCHECK
-# ==============================
+
+# ------------- Healthcheck ----------------------------------
 @app.route("/", methods=["GET"])
-def home():
+def root():
     return "✅ Agendador WhatsApp ativo", 200
 
-# ==============================
-# 💬 WEBHOOK WHATSAPP (Twilio)
-# ==============================
-@app.route("/whats", methods=["POST"])
-def whats():
-    """
-    Recebe mensagem do WhatsApp (via Twilio)
-    → interpreta o texto
-    → cria evento no Google Calendar
-    → responde ao usuário
-    """
-    msg = request.form.get("Body", "").strip()
-    sender = request.form.get("From", "")
-    print(f"📩 Mensagem de {sender}: {msg}")
 
-    resposta = MessagingResponse()
+# ------------- Webhook Verification (GET) -------------------
+@app.route("/webhook", methods=["GET"])
+def verify():
+    """
+    Meta chama GET na validação do webhook:
+      /webhook?hub.mode=subscribe&hub.verify_token=...&hub.challenge=...
+    Devemos retornar o hub.challenge quando o verify_token bate.
+    """
+    mode = request.args.get("hub.mode")
+    token = request.args.get("hub.verify_token")
+    challenge = request.args.get("hub.challenge")
 
+    if mode == "subscribe" and token == META_VERIFY_TOKEN:
+        print("✅ Webhook verificado pela Meta.")
+        return Response(challenge, status=200, mimetype="text/plain")
+    else:
+        print("🔴 Falha na verificação de webhook.")
+        return Response("forbidden", status=403, mimetype="text/plain")
+
+
+# ------------- Webhook Receiver (POST) ----------------------
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    """
+    Recebe mensagens do WhatsApp Cloud API.
+    Responde com texto de confirmação depois de criar o evento.
+    """
+    payload = request.get_json(force=True, silent=True) or {}
+    # Meta exige 200 rápido:
+    # vamos processar inline (simples) – para alto volume, mover para fila.
     try:
-        if not service:
-            raise Exception("Google Calendar não autenticado.")
+        entries = payload.get("entry", [])
+        for entry in entries:
+            for change in entry.get("changes", []):
+                value = change.get("value", {})
+                messages = value.get("messages", [])
+                for msg in messages:
+                    # Apenas texto
+                    if msg.get("type") != "text":
+                        continue
 
-        # 1️⃣ Interpretar mensagem
-        parsed = interpretar_mensagem(msg)
-        print(f"🧠 Interpretado: {parsed}")
+                    wa_text  = (msg.get("text") or {}).get("body", "").strip()
+                    wa_from  = msg.get("from")  # ex: "5531984478737"
+                    print(f"📩 WhatsApp de {wa_from}: {wa_text}")
 
-        # 2️⃣ Criar evento
-        resultado = criar_evento_google_calendar(service, parsed)
-        print(f"✅ Resultado: {resultado}")
+                    # 1) Interpretar
+                    parsed = interpretar_mensagem(wa_text, tz=TZ)
+                    print(f"🧠 Interpretado: {parsed}")
 
-        # 3️⃣ Enviar resposta ao WhatsApp
-        resposta.message(resultado)
-        xml = str(resposta)
+                    # 2) Criar evento
+                    if not CALENDAR_ID:
+                        resultado = "❌ Falta configurar CALENDAR_ID."
+                    else:
+                        service = get_calendar_service()
+                        resultado = criar_evento_google_calendar(service, parsed, calendar_id=CALENDAR_ID, tz=TZ)
+                    print(f"✅ Resultado: {resultado}")
 
-        # ⚠️ IMPORTANTE — Twilio exige XML com MIME correto
-        return Response(xml, mimetype="text/xml")
+                    # 3) Responder no WhatsApp
+                    send_whatsapp_text(wa_to=wa_from, text=resultado)
+
+        return jsonify({"status": "ok"}), 200
 
     except Exception as e:
-        erro_txt = f"❌ Erro ao criar evento: {e}"
-        print(f"🔴 {erro_txt}")
-        resposta.message(erro_txt)
-        return Response(str(resposta), mimetype="text/xml")
+        print(f"🔴 Erro no webhook: {e}")
+        return jsonify({"status": "error"}), 200  # sempre 200 p/ Meta não re-tentar infinitamente
 
 
-# ==============================
-# 🚀 EXECUÇÃO LOCAL (debug)
-# ==============================
+# ------------- Envio de mensagens (Meta) --------------------
+def send_whatsapp_text(wa_to: str, text: str):
+    """
+    Envia texto usando a API de mensagens da Meta.
+    wa_to: número no formato internacional sem '+', ex: '5531984478737'
+    """
+    url = f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {META_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    body = {
+        "messaging_product": "whatsapp",
+        "to": wa_to,
+        "type": "text",
+        "text": {"body": text}
+    }
+    r = requests.post(url, headers=headers, json=body, timeout=10)
+    if r.status_code >= 300:
+        print(f"🔴 Falha ao enviar WhatsApp: {r.status_code} - {r.text}")
+    else:
+        print("📤 Resposta enviada ao WhatsApp.")
+
+
+# ------------- Execução local --------------------------------
 if __name__ == "__main__":
-    porta = int(os.getenv("PORT", 10000))
-    print(f"🚀 Executando localmente em http://127.0.0.1:{porta}")
-    app.run(host="0.0.0.0", port=porta)
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
