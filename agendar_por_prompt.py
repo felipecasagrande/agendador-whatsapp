@@ -1,269 +1,249 @@
 # -*- coding: utf-8 -*-
 """
-agendar_por_prompt.py
-Camada de domínio: interpretar mensagem em PT-BR e criar eventos no Google Calendar.
+agendador_whatsapp.py
+Camada de domínio: interpretar mensagem em PT-BR e criar evento no Google Calendar.
+
+Regras implementadas:
+- “hoje”, “amanhã/amanha”, “depois de amanhã/amanha”
+- “fim do mês” (mês corrente)
+- “semana que vem” (+7 dias)
+- data explícita “24 de outubro de 2025” (ou “24 de outubro” => ano corrente)
+- “na próxima <dia da semana>” (se hoje for o dia, vai para a semana seguinte)
+- extrai horários “10h30”, “10:30”, “16h”, etc.
+- sem hora => evento de dia inteiro
+- com hora => 60 min + Meet
+- “convide amor” -> adiciona automaticamente britto.marilia@gmail.com
 """
 
-import os
-import json
 import re
+import uuid
 import pytz
-import httpx
-from datetime import datetime, timedelta
-from googleapiclient.discovery import build
-from google.oauth2 import service_account
+from calendar import monthrange
+from datetime import datetime, timedelta, date, time as dtime
 
-# ======================================================
-# 🔧 CONFIGURAÇÕES GERAIS
-# ======================================================
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
-TZ = "America/Sao_Paulo"
+# -------------------- CONFIG --------------------
+TZ = pytz.timezone("America/Sao_Paulo")
+DUR_PADRAO_MIN = 60
+CONVIDADO_AMOR = "britto.marilia@gmail.com"
+# ------------------------------------------------
 
-# Desativa cache problemático do Google API
-import googleapiclient.discovery_cache.base
-class MemoryCache(googleapiclient.discovery_cache.base.Cache):
-    def __init__(self):
-        self.cache = {}
+MESES = {
+    "janeiro": 1, "fevereiro": 2, "marco": 3, "março": 3,
+    "abril": 4, "maio": 5, "junho": 6, "julho": 7, "agosto": 8,
+    "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12
+}
 
-    def get(self, url):
-        return self.cache.get(url)
+DIAS = {
+    "segunda": 0, "segunda-feira": 0,
+    "terca": 1, "terça": 1, "terca-feira": 1, "terça-feira": 1,
+    "quarta": 2, "quarta-feira": 2,
+    "quinta": 3, "quinta-feira": 3,
+    "sexta": 4, "sexta-feira": 4,
+    "sabado": 5, "sábado": 5,
+    "domingo": 6
+}
 
-    def set(self, url, content):
-        self.cache[url] = content
 
-# ======================================================
-# 🧠 INTERPRETAÇÃO DE TEXTO (IA OpenAI)
-# ======================================================
-def interpretar_prompt(prompt: str):
+def _agora():
+    return datetime.now(TZ)
+
+
+def _norm(txt: str) -> str:
+    txt = txt.lower().strip()
+    txt = re.sub(r"\s+", " ", txt)
+    return txt
+
+
+def extrai_hora(msg: str):
     """
-    Usa GPT-4o-mini para interpretar frases e retornar:
-    titulo, data, hora, duracao_min, participantes, descricao, colorId
+    Retorna um dtime (timezone-aware) ou None.
+    Suporta: 10h, 10h30, 10:30, 9, 09:00
     """
-    tz = pytz.timezone(TZ)
-    hoje = datetime.now(tz).date()
+    m = re.search(r"\b(\d{1,2})h(?:(\d{2}))\b", _norm(msg))
+    if m:
+        hh = int(m.group(1))
+        mm = int(m.group(2))
+        if 0 <= hh < 24 and 0 <= mm < 60:
+            return dtime(hh, mm, tzinfo=TZ)
+    m = re.search(r"\b(\d{1,2})h\b", _norm(msg))
+    if m:
+        hh = int(m.group(1))
+        if 0 <= hh < 24:
+            return dtime(hh, 0, tzinfo=TZ)
+    m = re.search(r"\b(\d{1,2})(?::(\d{2}))\b", _norm(msg))
+    if m:
+        hh = int(m.group(1))
+        mm = int(m.group(2))
+        if 0 <= hh < 24 and 0 <= mm < 60:
+            return dtime(hh, mm, tzinfo=TZ)
+    # número isolado (ex.: "9")
+    m = re.search(r"\b(\d{1,2})\b", _norm(msg))
+    if m:
+        hh = int(m.group(1))
+        if 0 <= hh < 24:
+            return dtime(hh, 0, tzinfo=TZ)
+    return None
 
-    try:
-        # 🔍 DETECÇÃO DE COMANDOS SIMPLES (como "Corte cabelo", "tomar psi")
-        prompt_limpo = prompt.strip().lower()
-        
-        # Lista de palavras que indicam comandos simples de agendamento
-        palavras_chave = ['corte', 'cabelo', 'reunião', 'consulta', 'compra', 'comprar', 
-                         'fazer', 'ir', 'visita', 'encontro', 'evento', 'tarefa', 'tomar',
-                         'psi', 'psicólogo', 'psicologa', 'médico', 'médica', 'dentista',
-                         'manipular', 'melatonina']
-        
-        # Se for um comando muito simples (1-3 palavras) contendo palavras-chave
-        palavras = prompt_limpo.split()
-        if 1 <= len(palavras) <= 3 and any(palavra in prompt_limpo for palavra in palavras_chave):
-            print(f"🎯 Detectado comando simples: '{prompt}' - Agendando para hoje")
-            return {
-                "titulo": prompt.strip(),
-                "data": hoje.strftime("%Y-%m-%d"),
-                "hora": "",
-                "duracao_min": 60,
-                "participantes": [],
-                "descricao": "Agendamento automático para hoje",
-                "colorId": "9"
-            }
 
-        token = os.getenv("OPENAI_TOKEN", "").strip()
-        if not token:
-            raise ValueError("OPENAI_TOKEN ausente no ambiente.")
-        print(f"✅ Token OpenAI ativo (prefixo): {token[:15]}")
+def _normaliza_chave(txt: str) -> str:
+    rep = str.maketrans({
+        "á": "a", "ã": "a", "â": "a", "à": "a",
+        "é": "e", "ê": "e",
+        "í": "i",
+        "ó": "o", "ô": "o",
+        "ú": "u",
+        "ç": "c"
+    })
+    return txt.translate(rep)
 
-        exemplos = [
-            {"input": "reunião com João amanhã às 10h30",
-             "output": {"titulo": "Reunião com João", "data": "amanhã", "hora": "10:30", "duracao_min": 60}},
-            {"input": "jantar com Maria hoje às 20h",
-             "output": {"titulo": "Jantar com Maria", "data": "hoje", "hora": "20:00", "duracao_min": 120}},
-            {"input": "comprar suco dia 23/10/2025",
-             "output": {"titulo": "Comprar suco", "data": "2025-10-23", "hora": "", "duracao_min": 30}},
-            {"input": "corte de cabelo",
-             "output": {"titulo": "Corte de cabelo", "data": "hoje", "hora": "", "duracao_min": 60}},
-            {"input": "consulta médica",
-             "output": {"titulo": "Consulta médica", "data": "hoje", "hora": "", "duracao_min": 60}},
-            {"input": "tomar psi",
-             "output": {"titulo": "Sessão de psicologia", "data": "hoje", "hora": "", "duracao_min": 60}},
-            {"input": "manipular melatonina",
-             "output": {"titulo": "Manipular melatonina", "data": "hoje", "hora": "", "duracao_min": 60}},
-        ]
 
-        prompt_base = (
-            "Você é um assistente que interpreta frases de agendamento em português e responde SOMENTE em JSON válido.\n"
-            "IMPORTANTE: Use APENAS datas válidas no formato AAAA-MM-DD. O mês deve ser entre 01-12.\n"
-            "Para frases simples sem data específica, use 'hoje'.\n\n"
-            "Campos obrigatórios:\n"
-            "- titulo: texto do evento\n"
-            "- data: AAAA-MM-DD ou 'hoje'/'amanhã'\n" 
-            "- hora: HH:MM ou string vazia para dia inteiro\n"
-            "- duracao_min: número em minutos (padrão: 60)\n"
-            "- participantes: lista vazia ou emails\n"
-            "- descricao: string vazia ou texto\n"
-            "- colorId: '9' (padrão)\n\n"
-            f"Exemplos:\n{json.dumps(exemplos, ensure_ascii=False, indent=2)}\n\n"
-            f"Processe agora: '{prompt}'\n"
-            "RESPONDA APENAS COM JSON VÁLIDO:"
-        )
+def extrai_data(msg: str, agora: datetime):
+    """
+    Retorna (date, origem_str) ou (None, None)
+    A ordem das verificações evita conflitos (ex.: "depois de amanhã" antes de "amanhã")
+    """
+    raw = _norm(msg)
 
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        body = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {"role": "system", "content": "Você é um assistente de agendamento. Responda APENAS com JSON válido. Use datas realistas (meses 01-12). Para 'tomar psi' retorne título 'Sessão de psicologia' e data 'hoje'."},
-                {"role": "user", "content": prompt_base},
-            ],
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"}
-        }
+    # 1) Depois de amanhã
+    if re.search(r"\bdepois de amanh?ã?\b", raw):
+        return (agora + timedelta(days=2)).date(), "depois_amanha"
 
-        print(f"🧠 Enviando para IA → {prompt}")
-        response = httpx.post("https://api.openai.com/v1/chat/completions", headers=headers, json=body, timeout=30)
-        data = response.json()
+    # 2) Amanhã
+    if re.search(r"\bamanh?ã?\b", raw):
+        return (agora + timedelta(days=1)).date(), "amanha"
 
-        conteudo = data["choices"][0]["message"]["content"].strip()
-        if conteudo.startswith("```"):
-            conteudo = conteudo.replace("```json", "").replace("```", "").strip()
+    # 3) Hoje
+    if re.search(r"\bhoje\b", raw):
+        return agora.date(), "hoje"
 
-        parsed = json.loads(conteudo)
+    # 4) Semana que vem (+7)
+    if re.search(r"\bsemana que vem\b", raw):
+        return (agora + timedelta(days=7)).date(), "semana_que_vem"
 
-        # 🔍 VALIDAÇÃO E CORREÇÃO DA DATA
-        data_original = parsed.get("data", "")
-        
-        # Corrige "hoje" / "amanhã"
-        if data_original == "hoje":
-            parsed["data"] = hoje.strftime("%Y-%m-%d")
-        elif data_original in ("amanha", "amanhã"):
-            parsed["data"] = (hoje + timedelta(days=1)).strftime("%Y-%m-%d")
-        
-        # Valida se a data é válida
-        data_final = parsed.get("data", "")
-        if data_final and data_final != "hoje" and data_final != "amanhã":
+    # 5) Fim do mês corrente
+    if re.search(r"\bfim do m[eê]s\b", raw):
+        y, m = agora.year, agora.month
+        last_day = monthrange(y, m)[1]
+        return date(y, m, last_day), "fim_do_mes"
+
+    # 6) Próxima <dia da semana>
+    m = re.search(r"\b(?:na|na\s+)?pr[oó]xima\s+(segunda|ter[cç]a|terça|quarta|quinta|sexta|s[áa]bado|sabado|domingo)\b", raw)
+    if m:
+        alvo_txt = _normaliza_chave(m.group(1))
+        # normaliza chaves
+        if alvo_txt == "terca": alvo_txt = "terca"
+        if alvo_txt == "sabado": alvo_txt = "sabado"
+        alvo = DIAS.get(alvo_txt, None)
+        if alvo is not None:
+            hoje_dw = agora.weekday()
+            delta = (alvo - hoje_dw) % 7
+            if delta == 0:
+                delta = 7
+            return (agora + timedelta(days=delta)).date(), "proxima_dia_semana"
+
+    # 7) Datas explícitas “24 de outubro de 2025” ou “24 de outubro”
+    m = re.search(r"\b(\d{1,2})\s+de\s+([a-záãéêíóôúç]+)(?:\s+de\s+(\d{4}))?\b", raw)
+    if m:
+        dd = int(m.group(1))
+        mes_txt = _normaliza_chave(m.group(2))
+        mm = MESES.get(mes_txt)
+        if mm:
+            yyyy = int(m.group(3)) if m.group(3) else agora.year
             try:
-                # Tenta converter para validar
-                datetime.strptime(data_final, "%Y-%m-%d")
-                # Verifica se o mês é válido (1-12)
-                ano, mes, dia = map(int, data_final.split('-'))
-                if not (1 <= mes <= 12):
-                    print(f"⚠️ Mês inválido {mes}, corrigindo para hoje")
-                    parsed["data"] = hoje.strftime("%Y-%m-%d")
-            except ValueError as e:
-                print(f"⚠️ Data inválida '{data_final}', corrigindo para hoje: {e}")
-                parsed["data"] = hoje.strftime("%Y-%m-%d")
+                return date(yyyy, mm, dd), "data_explicita"
+            except ValueError:
+                pass
 
-        # Garante campos obrigatórios
-        parsed["titulo"] = parsed.get("titulo", prompt.strip())
-        parsed["hora"] = parsed.get("hora", "")
-        parsed["duracao_min"] = parsed.get("duracao_min", 60)
-        parsed["participantes"] = parsed.get("participantes", [])
-        parsed["descricao"] = parsed.get("descricao", "")
-        parsed["colorId"] = parsed.get("colorId", "9")
-
-        print("🧩 Saída final da IA (VALIDADA):")
-        print(json.dumps(parsed, indent=2, ensure_ascii=False))
-        return parsed
-
-    except Exception as e:
-        print(f"❌ Erro ao interpretar prompt: {e}")
-        # Fallback: se der erro na IA, cria evento para hoje
-        print(f"🔄 Fallback: criando evento para hoje com título '{prompt}'")
-        return {
-            "titulo": prompt.strip(),
-            "data": hoje.strftime("%Y-%m-%d"),
-            "hora": "",
-            "duracao_min": 60,
-            "participantes": [],
-            "descricao": "Agendamento automático",
-            "colorId": "9"
-        }
+    return None, None
 
 
-# ======================================================
-# 🔐 GOOGLE CALENDAR SERVICE ACCOUNT
-# ======================================================
-def get_calendar_service():
-    """Autentica via Service Account com tratamento robusto de JSON"""
-    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-    if not creds_json:
-        raise ValueError("❌ GOOGLE_CREDENTIALS_JSON ausente no ambiente.")
-
-    # Limpeza básica
-    cleaned = creds_json.strip()
-    cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', cleaned)
-    
-    if not cleaned.startswith("{"):
-        raise ValueError("❌ O conteúdo de GOOGLE_CREDENTIALS_JSON não é um JSON válido.")
-
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        print(f"❌ Erro ao decodificar JSON: {e}")
-        raise ValueError(f"Erro ao decodificar GOOGLE_CREDENTIALS_JSON: {e}")
-
-    creds = service_account.Credentials.from_service_account_info(data, scopes=SCOPES)
-    print(f"✅ Credenciais carregadas: {data.get('client_email')}")
-    
-    # Usa cache em memória para evitar problemas de arquivo
-    return build("calendar", "v3", credentials=creds, cache=MemoryCache())
+def precisa_convidar_amor(msg: str) -> bool:
+    return "convide amor" in _norm(msg)
 
 
-# ======================================================
-# 📅 CRIAÇÃO DE EVENTO COM TRATAMENTO DE ERRO
-# ======================================================
-def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, descricao, colorId="9"):
-    """Cria evento no Google Calendar com tratamento robusto de erro"""
-    try:
-        service = get_calendar_service()
-        fuso = pytz.timezone(TZ)
-        hoje = datetime.now(fuso).date()
+def interpretar_mensagem(msg: str):
+    """
+    Produz um dicionário padronizado para o agendamento.
+    """
+    agora = _agora()
+    titulo = msg.strip()
+    data_dt, origem = extrai_data(msg, agora)
+    hora_dt = extrai_hora(msg)
 
-        # VALIDAÇÃO FINAL DA DATA
-        if isinstance(data_inicio, str):
-            if data_inicio.lower() == "hoje":
-                data_inicio = hoje.strftime("%Y-%m-%d")
-            elif data_inicio.lower() in ("amanha", "amanhã"):
-                data_inicio = (hoje + timedelta(days=1)).strftime("%Y-%m-%d")
-            else:
-                # Valida formato da data
-                try:
-                    datetime.strptime(data_inicio, "%Y-%m-%d")
-                except ValueError:
-                    print(f"⚠️ Data final inválida '{data_inicio}', usando hoje")
-                    data_inicio = hoje.strftime("%Y-%m-%d")
+    participantes = []
+    if precisa_convidar_amor(msg):
+        participantes.append(CONVIDADO_AMOR)
 
-        # Evento de dia inteiro
-        if not hora_inicio or str(hora_inicio).strip() == "":
-            data_fim = (datetime.strptime(data_inicio, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-            body = {
-                "summary": titulo or "Evento",
-                "description": descricao or "",
-                "start": {"date": data_inicio},
-                "end": {"date": data_fim},
-                "attendees": [{"email": e} for e in (participantes or []) if "@" in e],
-                "colorId": colorId,
-                "reminders": {"useDefault": False},
-            }
-            ev = service.events().insert(calendarId="primary", body=body).execute()
-            link = ev.get('htmlLink', 'Link não disponível')
-            print(f"✅ Evento de dia inteiro criado: {link}")
-            return ev, link
+    return {
+        "titulo": titulo,
+        "data": data_dt.isoformat() if data_dt else "",
+        "hora": hora_dt.strftime("%H:%M") if hora_dt else "",
+        "duracao_min": DUR_PADRAO_MIN if hora_dt else 0,
+        "participantes": participantes,
+        "descricao": "",
+        "meta": {"origem_data": origem}
+    }
 
-        # Evento com hora definida
-        inicio = fuso.localize(datetime.strptime(f"{data_inicio} {hora_inicio}", "%Y-%m-%d %H:%M"))
-        fim = inicio + timedelta(minutes=int(duracao_min or 60))
+
+# ----------------- GOOGLE CALENDAR -----------------
+
+def criar_evento_google_calendar(service, parsed: dict):
+    """
+    service: googleapiclient Calendar v3
+    parsed: retorno de interpretar_mensagem()
+
+    - Sem hora => all-day
+    - Com hora => DUR_PADRAO_MIN + Meet
+    - “convide amor” => adiciona CONVIDADO_AMOR
+    """
+    titulo = parsed["titulo"]
+    participantes = parsed.get("participantes", [])
+
+    if not parsed["data"]:
+        return "❌ Não consegui entender a data. Exemplos: 'amanhã às 10h30', 'fim do mês', 'na próxima quinta'."
+
+    # All-day
+    if not parsed["hora"]:
+        dia = datetime.fromisoformat(parsed["data"]).date()
         body = {
-            "summary": titulo or "Evento",
-            "description": descricao or "",
-            "start": {"dateTime": inicio.isoformat(), "timeZone": TZ},
-            "end": {"dateTime": fim.isoformat(), "timeZone": TZ},
-            "attendees": [{"email": e} for e in (participantes or []) if "@" in e],
-            "colorId": colorId,
-            "reminders": {"useDefault": True},
+            "summary": titulo,
+            "start": {"date": dia.isoformat()},
+            "end": {"date": (dia + timedelta(days=1)).isoformat()},
         }
-        ev = service.events().insert(calendarId="primary", body=body).execute()
-        link = ev.get('htmlLink', 'Link não disponível')
-        print(f"✅ Evento com hora criado: {link}")
-        return ev, link
+        if participantes:
+            body["attendees"] = [{"email": e} for e in participantes]
 
-    except Exception as e:
-        print(f"❌ Erro ao criar evento no Google Calendar: {e}")
-        raise
+        service.events().insert(calendarId="primary", body=body).execute()
+        return f"✅ Evento de dia inteiro criado em {dia.strftime('%d/%m/%Y')}: {titulo}"
+
+    # Timed + Meet
+    dia = datetime.fromisoformat(parsed["data"]).date()
+    hh, mm = map(int, parsed["hora"].split(":"))
+    inicio = TZ.localize(datetime.combine(dia, dtime(hh, mm)))
+    fim = inicio + timedelta(minutes=parsed["duracao_min"] or DUR_PADRAO_MIN)
+
+    body = {
+        "summary": titulo,
+        "start": {"dateTime": inicio.isoformat()},
+        "end": {"dateTime": fim.isoformat()},
+        "conferenceData": {
+            "createRequest": {
+                "requestId": str(uuid.uuid4()),
+                "conferenceSolutionKey": {"type": "hangoutsMeet"}
+            }
+        }
+    }
+    if participantes:
+        body["attendees"] = [{"email": e} for e in participantes]
+
+    created = service.events().insert(
+        calendarId="primary",
+        body=body,
+        conferenceDataVersion=1
+    ).execute()
+
+    # Se quiser devolver o link do meet:
+    meet = created.get("hangoutLink")
+    if meet:
+        return f"✅ Evento criado para {inicio.strftime('%d/%m/%Y %H:%M')} (Meet): {titulo}\n🔗 {meet}"
+    return f"✅ Evento criado para {inicio.strftime('%d/%m/%Y %H:%M')} (Meet adicionado): {titulo}"
