@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, date, time as dtime
 TZ = pytz.timezone("America/Sao_Paulo")
 DUR_PADRAO_MIN = 60
 CONVIDADO_AMOR = "britto.marilia@gmail.com"
-CALENDAR_ID = "seu_email@gmail.com"  # <-- substitua aqui pelo SEU e-mail do Google
+CALENDAR_ID = "felipecasagrandematos@gmail.com"  # <-- substitua aqui pelo SEU e-mail do Google
 # ------------------------------------------------
 
 MESES = {
