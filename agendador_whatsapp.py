@@ -1,18 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 agendador_whatsapp.py
-Camada de domínio: interpretar mensagem em PT-BR e criar evento no Google Calendar.
+Versão Render 2025 — compatível com conta de serviço (service_account)
+sem criação de link Meet (contas de serviço não suportam Meet).
 
-Regras implementadas:
-- “hoje”, “amanhã/amanha”, “depois de amanhã/amanha”
-- “fim do mês” (mês corrente)
-- “semana que vem” (+7 dias)
-- data explícita “24 de outubro de 2025” (ou “24 de outubro” => ano corrente)
-- “na próxima <dia da semana>” (se hoje for o dia, vai para a semana seguinte)
-- extrai horários “10h30”, “10:30”, “16h”, etc.
-- sem hora => evento de dia inteiro
-- com hora => 60 min + Meet
-- “convide amor” -> adiciona automaticamente britto.marilia@gmail.com
+✅ Funções:
+- interpreta frases em português natural (“hoje”, “amanhã”, “às 15h30”, etc.)
+- cria eventos no Google Calendar
+- suporte a 'convide amor' para adicionar participante fixo
 """
 
 import re
@@ -25,6 +20,7 @@ from datetime import datetime, timedelta, date, time as dtime
 TZ = pytz.timezone("America/Sao_Paulo")
 DUR_PADRAO_MIN = 60
 CONVIDADO_AMOR = "britto.marilia@gmail.com"
+CALENDAR_ID = "seu_email@gmail.com"  # <-- substitua aqui pelo SEU e-mail do Google
 # ------------------------------------------------
 
 MESES = {
@@ -100,39 +96,29 @@ def _normaliza_chave(txt: str) -> str:
 def extrai_data(msg: str, agora: datetime):
     """
     Retorna (date, origem_str) ou (None, None)
-    A ordem das verificações evita conflitos (ex.: "depois de amanhã" antes de "amanhã")
     """
     raw = _norm(msg)
 
-    # 1) Depois de amanhã
     if re.search(r"\bdepois de amanh?ã?\b", raw):
         return (agora + timedelta(days=2)).date(), "depois_amanha"
 
-    # 2) Amanhã
     if re.search(r"\bamanh?ã?\b", raw):
         return (agora + timedelta(days=1)).date(), "amanha"
 
-    # 3) Hoje
     if re.search(r"\bhoje\b", raw):
         return agora.date(), "hoje"
 
-    # 4) Semana que vem (+7)
     if re.search(r"\bsemana que vem\b", raw):
         return (agora + timedelta(days=7)).date(), "semana_que_vem"
 
-    # 5) Fim do mês corrente
     if re.search(r"\bfim do m[eê]s\b", raw):
         y, m = agora.year, agora.month
         last_day = monthrange(y, m)[1]
         return date(y, m, last_day), "fim_do_mes"
 
-    # 6) Próxima <dia da semana>
     m = re.search(r"\b(?:na|na\s+)?pr[oó]xima\s+(segunda|ter[cç]a|terça|quarta|quinta|sexta|s[áa]bado|sabado|domingo)\b", raw)
     if m:
         alvo_txt = _normaliza_chave(m.group(1))
-        # normaliza chaves
-        if alvo_txt == "terca": alvo_txt = "terca"
-        if alvo_txt == "sabado": alvo_txt = "sabado"
         alvo = DIAS.get(alvo_txt, None)
         if alvo is not None:
             hoje_dw = agora.weekday()
@@ -141,7 +127,6 @@ def extrai_data(msg: str, agora: datetime):
                 delta = 7
             return (agora + timedelta(days=delta)).date(), "proxima_dia_semana"
 
-    # 7) Datas explícitas “24 de outubro de 2025” ou “24 de outubro”
     m = re.search(r"\b(\d{1,2})\s+de\s+([a-záãéêíóôúç]+)(?:\s+de\s+(\d{4}))?\b", raw)
     if m:
         dd = int(m.group(1))
@@ -191,10 +176,6 @@ def criar_evento_google_calendar(service, parsed: dict):
     """
     service: googleapiclient Calendar v3
     parsed: retorno de interpretar_mensagem()
-
-    - Sem hora => all-day
-    - Com hora => DUR_PADRAO_MIN + Meet
-    - “convide amor” => adiciona CONVIDADO_AMOR
     """
     titulo = parsed["titulo"]
     participantes = parsed.get("participantes", [])
@@ -213,10 +194,10 @@ def criar_evento_google_calendar(service, parsed: dict):
         if participantes:
             body["attendees"] = [{"email": e} for e in participantes]
 
-        service.events().insert(calendarId="primary", body=body).execute()
+        service.events().insert(calendarId=CALENDAR_ID, body=body).execute()
         return f"✅ Evento de dia inteiro criado em {dia.strftime('%d/%m/%Y')}: {titulo}"
 
-    # Timed + Meet
+    # Timed (sem Meet)
     dia = datetime.fromisoformat(parsed["data"]).date()
     hh, mm = map(int, parsed["hora"].split(":"))
     inicio = TZ.localize(datetime.combine(dia, dtime(hh, mm)))
@@ -226,24 +207,10 @@ def criar_evento_google_calendar(service, parsed: dict):
         "summary": titulo,
         "start": {"dateTime": inicio.isoformat()},
         "end": {"dateTime": fim.isoformat()},
-        "conferenceData": {
-            "createRequest": {
-                "requestId": str(uuid.uuid4()),
-                "conferenceSolutionKey": {"type": "hangoutsMeet"}
-            }
-        }
     }
+
     if participantes:
         body["attendees"] = [{"email": e} for e in participantes]
 
-    created = service.events().insert(
-        calendarId="primary",
-        body=body,
-        conferenceDataVersion=1
-    ).execute()
-
-    # Se quiser devolver o link do meet:
-    meet = created.get("hangoutLink")
-    if meet:
-        return f"✅ Evento criado para {inicio.strftime('%d/%m/%Y %H:%M')} (Meet): {titulo}\n🔗 {meet}"
-    return f"✅ Evento criado para {inicio.strftime('%d/%m/%Y %H:%M')} (Meet adicionado): {titulo}"
+    service.events().insert(calendarId=CALENDAR_ID, body=body).execute()
+    return f"✅ Evento criado para {inicio.strftime('%d/%m/%Y %H:%M')}: {titulo}"
