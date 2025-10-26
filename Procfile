@@ -1,1 +1,1 @@
-web: gunicorn whatsapp_twilio:app
+web: gunicorn app:app
