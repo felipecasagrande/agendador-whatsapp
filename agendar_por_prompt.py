@@ -83,7 +83,7 @@ def interpretar_prompt(prompt: str):
 
         parsed = json.loads(conteudo)
 
-        # Corrige “hoje” / “amanhã”
+        # Corrige "hoje" / "amanhã"
         if parsed.get("data") == "hoje":
             parsed["data"] = hoje.strftime("%Y-%m-%d")
         elif parsed.get("data") in ("amanha", "amanhã"):
@@ -99,44 +99,34 @@ def interpretar_prompt(prompt: str):
 
 
 # ======================================================
-# 🔐 GOOGLE CALENDAR SERVICE ACCOUNT (com correção Render)
-# ======================================================
-# ======================================================
-# 🔐 GOOGLE CALENDAR SERVICE ACCOUNT (versão blindada)
+# 🔐 GOOGLE CALENDAR SERVICE ACCOUNT (versão simplificada)
 # ======================================================
 def get_calendar_service():
-    """Autentica via Service Account, corrigindo qualquer variação de formato no Render"""
+    """Autentica via Service Account com tratamento robusto de JSON"""
     creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
     if not creds_json:
         raise ValueError("❌ GOOGLE_CREDENTIALS_JSON ausente no ambiente.")
 
-    # 🔍 Limpeza inteligente: normaliza todas as barras e quebras
+    # Limpeza básica - remove apenas espaços em branco extras
     cleaned = creds_json.strip()
-
-    # Se vier com \\n duplas, transforma em \n reais
-    if "\\n" in cleaned and not cleaned.count("\\\\n"):
-        cleaned = cleaned.replace("\\n", "\n")
-
-    # Se vier com escapes simples inválidos (\s, \t, etc), reforça todas as barras
-    import re
-    cleaned = re.sub(r'(?<!\\)\\(?![n"\\/bfnrtu])', r"\\\\", cleaned)
-
-    # Se o Render colou o JSON inline (sem aspas corretas), corrige delimitadores
+    
+    # Remove caracteres de controle inválidos (exceto \n, \t, etc.)
+    cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', cleaned)
+    
+    # Verifica se é um JSON válido
     if not cleaned.startswith("{"):
         raise ValueError("❌ O conteúdo de GOOGLE_CREDENTIALS_JSON não é um JSON válido.")
 
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError as e:
-        print("⚠️ JSON inválido após limpeza. Salvando trecho para depuração.")
-        with open("debug_creds.txt", "w", encoding="utf-8") as f:
-            f.write(cleaned[:500])
+        print(f"❌ Erro ao decodificar JSON: {e}")
+        print(f"📝 Trecho do JSON (linha 5): {cleaned.split(chr(10))[4] if chr(10) in cleaned else 'Não encontrada'}")
         raise ValueError(f"Erro ao decodificar GOOGLE_CREDENTIALS_JSON: {e}")
 
     creds = service_account.Credentials.from_service_account_info(data, scopes=SCOPES)
     print(f"✅ Credenciais carregadas: {data.get('client_email')}")
     return build("calendar", "v3", credentials=creds)
-
 
 
 # ======================================================
@@ -148,7 +138,7 @@ def criar_evento(titulo, data_inicio, hora_inicio, duracao_min, participantes, d
     fuso = pytz.timezone(TZ)
     hoje = datetime.now(fuso).date()
 
-    # Converte “hoje” e “amanhã”
+    # Converte "hoje" e "amanhã"
     if isinstance(data_inicio, str):
         if data_inicio.lower() == "hoje":
             data_inicio = hoje.strftime("%Y-%m-%d")
