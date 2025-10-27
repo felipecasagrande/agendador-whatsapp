@@ -2,19 +2,7 @@
 """
 app.py
 Flask + UltraMsg + Google Calendar (Service Account)
-
-Fluxo:
-→ recebe mensagem via UltraMsg webhook (/webhook)
-→ interpreta texto com agendador_whatsapp.py
-→ cria evento no Google Calendar
-→ responde pelo WhatsApp via UltraMsg API
-
-Variáveis obrigatórias (Render):
-- ULTRAMSG_INSTANCE_ID
-- ULTRAMSG_TOKEN
-- CALENDAR_ID
-- GOOGLE_CREDENTIALS_JSON
-- TZ (opcional, default America/Sao_Paulo)
+✅ Corrigido para evitar loop de respostas
 """
 
 import os
@@ -63,11 +51,11 @@ def webhook_ultramsg():
     """
     Recebe mensagens do UltraMsg:
     {
-        "data": {
-            "from": "5531984478737",
-            "body": "comprar café amanhã às 11h",
-            ...
-        }
+      "data": {
+        "from": "5531984478737",
+        "fromMe": false,
+        "body": "comprar café amanhã às 11h"
+      }
     }
     """
     try:
@@ -76,8 +64,10 @@ def webhook_ultramsg():
 
         wa_from = data.get("from")
         wa_text = (data.get("body") or "").strip()
+        is_from_me = data.get("fromMe", False)
 
-        if not wa_from or not wa_text:
+        # Ignorar mensagens enviadas pelo próprio bot (para evitar loop)
+        if is_from_me or not wa_from or not wa_text:
             return jsonify({"status": "ignored"}), 200
 
         print(f"📩 Mensagem recebida de {wa_from}: {wa_text}")
