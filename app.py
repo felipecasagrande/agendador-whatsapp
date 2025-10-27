@@ -27,7 +27,7 @@ TZ = build_tz(os.getenv("TZ", "America/Sao_Paulo"))
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 # ✅ Apenas mensagens desse número serão aceitas
-NUMERO_AUTORIZADO = "5531984478737"  # sem o "+"
+NUMERO_AUTORIZADO = "553184478737"  # sem o "+"
 
 
 # -------------------- Calendar Service --------------------
@@ -57,7 +57,7 @@ def webhook_ultramsg():
     Exemplo de payload:
     {
       "data": {
-        "from": "5531984478737@c.us",
+        "from": "553184478737@c.us",
         "fromMe": false,
         "body": "comprar café amanhã às 11h"
       }
