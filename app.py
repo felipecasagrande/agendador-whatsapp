@@ -2,7 +2,7 @@
 """
 app.py
 Flask + UltraMsg + Google Calendar (Service Account)
-✅ Corrigido para evitar loops e limitar mensagens ao número autorizado
+✅ Evita loops, cria eventos só do número autorizado e ignora canais/grupos
 """
 
 import os
@@ -26,7 +26,7 @@ TZ = build_tz(os.getenv("TZ", "America/Sao_Paulo"))
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-# Somente mensagens deste número serão aceitas
+# ✅ Apenas mensagens desse número serão aceitas
 NUMERO_AUTORIZADO = "5531984478737"  # sem o "+"
 
 
@@ -46,7 +46,7 @@ def get_calendar_service():
 # -------------------- Healthcheck --------------------
 @app.route("/", methods=["GET"])
 def root():
-    return "✅ Agendador WhatsApp ativo (UltraMsg filtrado)", 200
+    return "✅ Agendador WhatsApp ativo (UltraMsg filtrado e seguro)", 200
 
 
 # -------------------- Webhook UltraMsg --------------------
@@ -57,7 +57,7 @@ def webhook_ultramsg():
     Exemplo de payload:
     {
       "data": {
-        "from": "5531984478737",
+        "from": "5531984478737@c.us",
         "fromMe": false,
         "body": "comprar café amanhã às 11h"
       }
@@ -71,12 +71,17 @@ def webhook_ultramsg():
         wa_text = (data.get("body") or "").strip()
         is_from_me = data.get("fromMe", False)
 
-        # 🚫 Ignorar mensagens que não são do número autorizado
-        if wa_from != NUMERO_AUTORIZADO:
-            print(f"🚫 Ignorado: mensagem de {wa_from}")
+        # 🚫 Ignora mensagens de outros números, canais ou grupos
+        if not wa_from.startswith(NUMERO_AUTORIZADO):
+            tipo = (
+                "grupo" if "@g.us" in wa_from else
+                "canal/newsletter" if "@newsletter" in wa_from else
+                "outro"
+            )
+            print(f"🚫 Ignorado ({tipo}): mensagem de {wa_from}")
             return jsonify({"status": "ignored"}), 200
 
-        # 🚫 Ignorar mensagens enviadas pelo próprio bot ou sem texto
+        # 🚫 Ignora mensagens enviadas pelo próprio bot ou sem texto
         if is_from_me or not wa_text:
             print(f"🔁 Ignorado (fromMe ou sem texto): {wa_text}")
             return jsonify({"status": "ignored"}), 200
@@ -87,7 +92,7 @@ def webhook_ultramsg():
         parsed = interpretar_mensagem(wa_text, tz=TZ)
         print(f"🧠 Interpretado: {parsed}")
 
-        # 2️⃣ Criar evento no Calendar
+        # 2️⃣ Criar evento no Google Calendar
         service = get_calendar_service()
         resultado = criar_evento_google_calendar(service, parsed, calendar_id=CALENDAR_ID, tz=TZ)
         print(f"✅ Resultado: {resultado}")
