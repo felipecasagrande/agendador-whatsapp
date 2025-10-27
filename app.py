@@ -2,7 +2,7 @@
 """
 app.py
 Flask + UltraMsg + Google Calendar (Service Account)
-✅ Corrigido para evitar loop de respostas
+✅ Corrigido para evitar loops e limitar mensagens ao número autorizado
 """
 
 import os
@@ -26,6 +26,10 @@ TZ = build_tz(os.getenv("TZ", "America/Sao_Paulo"))
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
+# Somente mensagens deste número serão aceitas
+NUMERO_AUTORIZADO = "5531984478737"  # sem o "+"
+
+
 # -------------------- Calendar Service --------------------
 _calendar_service = None
 def get_calendar_service():
@@ -42,14 +46,15 @@ def get_calendar_service():
 # -------------------- Healthcheck --------------------
 @app.route("/", methods=["GET"])
 def root():
-    return "✅ Agendador WhatsApp ativo (UltraMsg)", 200
+    return "✅ Agendador WhatsApp ativo (UltraMsg filtrado)", 200
 
 
 # -------------------- Webhook UltraMsg --------------------
 @app.route("/webhook", methods=["POST"])
 def webhook_ultramsg():
     """
-    Recebe mensagens do UltraMsg:
+    Recebe mensagens do UltraMsg e cria eventos APENAS se vierem do seu número pessoal.
+    Exemplo de payload:
     {
       "data": {
         "from": "5531984478737",
@@ -62,15 +67,21 @@ def webhook_ultramsg():
         payload = request.get_json(force=True, silent=True) or {}
         data = payload.get("data") or {}
 
-        wa_from = data.get("from")
+        wa_from = data.get("from", "").strip()
         wa_text = (data.get("body") or "").strip()
         is_from_me = data.get("fromMe", False)
 
-        # Ignorar mensagens enviadas pelo próprio bot (para evitar loop)
-        if is_from_me or not wa_from or not wa_text:
+        # 🚫 Ignorar mensagens que não são do número autorizado
+        if wa_from != NUMERO_AUTORIZADO:
+            print(f"🚫 Ignorado: mensagem de {wa_from}")
             return jsonify({"status": "ignored"}), 200
 
-        print(f"📩 Mensagem recebida de {wa_from}: {wa_text}")
+        # 🚫 Ignorar mensagens enviadas pelo próprio bot ou sem texto
+        if is_from_me or not wa_text:
+            print(f"🔁 Ignorado (fromMe ou sem texto): {wa_text}")
+            return jsonify({"status": "ignored"}), 200
+
+        print(f"📩 Mensagem autorizada de {wa_from}: {wa_text}")
 
         # 1️⃣ Interpretar texto
         parsed = interpretar_mensagem(wa_text, tz=TZ)
