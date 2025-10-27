@@ -2,7 +2,8 @@
 """
 app.py
 Flask + UltraMsg + Google Calendar (Service Account)
-✅ Evita loops, cria eventos só do número autorizado e ignora canais/grupos
+✅ Evita loops, aceita mensagens do número autorizado (mesmo com fromMe=True),
+   e ignora canais, grupos e outros contatos.
 """
 
 import os
@@ -58,7 +59,7 @@ def webhook_ultramsg():
     {
       "data": {
         "from": "553184478737@c.us",
-        "fromMe": false,
+        "fromMe": true,
         "body": "comprar café amanhã às 11h"
       }
     }
@@ -81,9 +82,14 @@ def webhook_ultramsg():
             print(f"🚫 Ignorado ({tipo}): mensagem de {wa_from}")
             return jsonify({"status": "ignored"}), 200
 
-        # 🚫 Ignora mensagens enviadas pelo próprio bot ou sem texto
-        if is_from_me or not wa_text:
-            print(f"🔁 Ignorado (fromMe ou sem texto): {wa_text}")
+        # 🚫 Ignora mensagens vazias
+        if not wa_text:
+            print("🔁 Ignorado (mensagem vazia)")
+            return jsonify({"status": "ignored"}), 200
+
+        # ✅ Permitir fromMe apenas se for o número autorizado
+        if is_from_me and not wa_from.startswith(NUMERO_AUTORIZADO):
+            print(f"🔁 Ignorado (fromMe de outro número): {wa_from}")
             return jsonify({"status": "ignored"}), 200
 
         print(f"📩 Mensagem autorizada de {wa_from}: {wa_text}")
